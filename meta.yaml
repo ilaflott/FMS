@@ -1,0 +1,43 @@
+package:
+  name: fms
+  version: "2024.01" # Or whatever the current release/hash is
+
+source:
+  path: .
+
+build:
+  number: 0
+
+requirements:
+  build:
+    - {{ compiler('c') }}
+    - {{ compiler('fortran') }}
+    - cmake
+    - make
+  host:
+    - netcdf-fortran
+    - mpich  # or openmpi
+    - yaml
+  run:
+    - netcdf-fortran
+    - mpich
+    - yaml
+
+test:
+  requires:
+    - {{ compiler('fortran') }}
+    - pkg-config
+  commands:
+    # 1. Verify the core library was installed (.a, .so, or .dylib)
+    - test -f $PREFIX/lib/libFMS.so
+    
+    # 2. Verify the base Fortran module was installed
+    - test -f $PREFIX/include/fms_mod.mod
+    
+    # 3. Verify pkg-config correctly detects the FMS installation
+    - pkg-config --modversion FMS
+
+about:
+  home: https://github.com/NOAA-GFDL/FMS
+  license: Apache-2.0
+  summary: "GFDL's Flexible Modeling System"
