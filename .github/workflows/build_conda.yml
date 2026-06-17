@@ -22,7 +22,7 @@ jobs:
         with:
           auto-update-conda: true
           python-version: "3.10"
-          channels: conda-forge, defaults
+          channels: conda-forge
           channel-priority: strict
 
       # 3. Install the build tools
@@ -34,4 +34,4 @@ jobs:
       - name: Build FMS Conda Package
         run: |
           # The '.' tells conda-build to look for meta.yaml in the current directory (the repo root)
-          conda build . -c conda-forge
+          conda build . --override-channels -c conda-forge
