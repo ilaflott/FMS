@@ -1,0 +1,30 @@
+package:
+  name: fms
+  version: "2024.01" # Or whatever the current release/hash is
+
+source:
+  git_url: https://github.com/NOAA-GFDL/FMS.git
+  git_rev: main # or a specific tag
+
+build:
+  number: 0
+
+requirements:
+  build:
+    - {{ compiler('c') }}
+    - {{ compiler('fortran') }}
+    - cmake
+    - make
+  host:
+    - netcdf-fortran
+    - mpich  # or openmpi
+    - yaml
+  run:
+    - netcdf-fortran
+    - mpich
+    - yaml
+
+about:
+  home: https://github.com/NOAA-GFDL/FMS
+  license: Apache-2.0
+  summary: "GFDL's Flexible Modeling System"
