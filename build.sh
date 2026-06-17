@@ -7,4 +7,8 @@ cmake .. \
     -DOPENMP=ON # Add other FMS-specific CMake flags here
 
 make -j${CPU_COUNT}
+
+# Run the repo's quick unit tests before installing
+ctest --output-on-failure
+
 make install
