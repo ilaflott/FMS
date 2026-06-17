@@ -1,0 +1,37 @@
+name: build_conda
+
+on: 
+  push:
+    # You can restrict this to specific branches later if you want:
+    # branches:
+    #   - conda_package
+    #   - main
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest # FMS is Linux/Unix focused, so Ubuntu is the best bet here
+
+    steps:
+      # 1. Check out your repository code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. Set up a Conda environment
+      - name: Setup Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          python-version: "3.10"
+          channels: conda-forge, defaults
+          channel-priority: strict
+
+      # 3. Install the build tools
+      - name: Install conda-build
+        run: |
+          conda install conda-build anaconda-client -y
+
+      # 4. Build the package
+      - name: Build FMS Conda Package
+        run: |
+          # The '.' tells conda-build to look for meta.yaml in the current directory (the repo root)
+          conda build . -c conda-forge
