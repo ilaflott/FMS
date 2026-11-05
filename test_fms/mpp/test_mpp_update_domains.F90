@@ -23,6 +23,9 @@ program test_mpp_update_domains
 
   use test_mpp_update_domains_real, only : test_halo_update_r8, test_halo_update_r4
   use test_mpp_update_domains_real, only : test_subset_update_r8, test_subset_update_r4
+  use test_mpp_update_domains_real, only : test_fold_overlap_widths
+  use test_mpp_update_domains_real, only : test_fold_group_updates
+  use test_mpp_update_domains_real, only : test_lower_fold_faces
   use test_mpp_update_domains_int , only : test_halo_update_i8, test_halo_update_i4
   use test_mpp_update_domains_int, only : test_subset_update_i8, test_subset_update_i4
   use mpp_mod, only : mpp_init, mpp_pe, mpp_npes, mpp_root_pe
@@ -48,6 +51,9 @@ program test_mpp_update_domains
   call test_halo_update_r4( 'Simple' ) !includes global field, global sum tests
   call test_halo_update_r4( 'Cyclic' )
   call test_halo_update_r4( 'Folded-north' ) !includes vector field test
+  call test_halo_update_r4( 'Folded-south' )
+  call test_halo_update_r4( 'Folded-west' )
+  call test_halo_update_r4( 'Folded-east' )
   call test_halo_update_r4( 'Masked' ) !includes vector field test
   call test_halo_update_r4( 'Folded xy_halo' ) !
   call test_halo_update_r4( 'Simple symmetry' ) !includes global field, global sum tests
@@ -60,6 +66,9 @@ program test_mpp_update_domains
   call test_halo_update_r8( 'Simple' ) !includes global field, global sum tests
   call test_halo_update_r8( 'Cyclic' )
   call test_halo_update_r8( 'Folded-north' ) !includes vector field test
+  call test_halo_update_r8( 'Folded-south' )
+  call test_halo_update_r8( 'Folded-west' )
+  call test_halo_update_r8( 'Folded-east' )
   call test_halo_update_r8( 'Masked' ) !includes vector field test
   call test_halo_update_r8( 'Folded xy_halo' ) !
   call test_halo_update_r8( 'Simple symmetry' ) !includes global field, global sum tests
@@ -68,6 +77,9 @@ program test_mpp_update_domains
   call test_halo_update_r8( 'Folded-south symmetry' ) !includes vector field test
   call test_halo_update_r8( 'Folded-west symmetry' ) !includes vector field test
   call test_halo_update_r8( 'Folded-east symmetry' ) !includes vector field test
+  call test_fold_overlap_widths()
+  call test_lower_fold_faces()
+  call test_fold_group_updates()
   if (mpp_pe() == mpp_root_pe()) &
     print *, '--------------------> Calling integer test_halo_update <-------------------'
   !> @note mpp_update_domains vector interfaces are not defined for integer data types

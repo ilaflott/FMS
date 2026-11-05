@@ -470,10 +470,11 @@ contains
     halo_data(1-whalo:0,1:nyp,:) = halo_data(nx-whalo+1:nx,1:nyp,:) ! west
     halo_data(nx+1:nx+ehalo+ishift,1:nyp,:) = halo_data(1:ehalo+ishift, 1:nyp,:) ! east
     if(m1 .GE. 1-whalo) &
-      halo_data(1-whalo:m1,1-shalo:0,:) = sign*halo_data(whalo+m2:1+ishift:-1, shalo+jshift:1+jshift:-1,:)
+      halo_data(1-whalo:m1,1-shalo:0,:) = sign*halo_data(whalo+m2:1+ishift:-1, shalo+2*jshift-joff:1+2*jshift-joff:-1,:)
 
-    halo_data(m1+1:nx+m2,1-shalo:0,:) = sign*halo_data(nxp:1:-1,shalo+jshift:1+jshift:-1,:)
-    halo_data(nx+m2+1:nxp+ehalo,1-shalo:0,:) = sign*halo_data(nx:nx-ehalo+m1+1:-1,shalo+jshift:1+jshift:-1,:)
+    halo_data(m1+1:nx+m2,1-shalo:0,:) = sign*halo_data(nxp:1:-1,shalo+2*jshift-joff:1+2*jshift-joff:-1,:)
+    halo_data(nx+m2+1:nxp+ehalo,1-shalo:0,:) = &
+      sign*halo_data(nx:nx-ehalo+m1+1:-1,shalo+2*jshift-joff:1+2*jshift-joff:-1,:)
 
   end subroutine fill_folded_south_halo_r8
 
@@ -492,10 +493,11 @@ contains
     halo_data(1-whalo:0,1:nyp,:) = halo_data(nx-whalo+1:nx,1:nyp,:) ! west
     halo_data(nx+1:nx+ehalo+ishift,1:nyp,:) = halo_data(1:ehalo+ishift, 1:nyp,:) ! east
     if(m1 .GE. 1-whalo) &
-      halo_data(1-whalo:m1,1-shalo:0,:) = sign*halo_data(whalo+m2:1+ishift:-1, shalo+jshift:1+jshift:-1,:)
+      halo_data(1-whalo:m1,1-shalo:0,:) = sign*halo_data(whalo+m2:1+ishift:-1, shalo+2*jshift-joff:1+2*jshift-joff:-1,:)
 
-    halo_data(m1+1:nx+m2,1-shalo:0,:) = sign*halo_data(nxp:1:-1,shalo+jshift:1+jshift:-1,:)
-    halo_data(nx+m2+1:nxp+ehalo,1-shalo:0,:) = sign*halo_data(nx:nx-ehalo+m1+1:-1,shalo+jshift:1+jshift:-1,:)
+    halo_data(m1+1:nx+m2,1-shalo:0,:) = sign*halo_data(nxp:1:-1,shalo+2*jshift-joff:1+2*jshift-joff:-1,:)
+    halo_data(nx+m2+1:nxp+ehalo,1-shalo:0,:) = &
+      sign*halo_data(nx:nx-ehalo+m1+1:-1,shalo+2*jshift-joff:1+2*jshift-joff:-1,:)
 
   end subroutine fill_folded_south_halo_r4
 
@@ -558,9 +560,10 @@ contains
     halo_data(1:nxp, 1-shalo:0,:) = halo_data(1:nxp, ny-shalo+1:ny, :) ! south
     halo_data(1:nxp, ny+1:nyp+nhalo,:) = halo_data(1:nxp, 1:nhalo+jshift,:) ! north
     if(m1 .GE. 1-shalo) &
-      halo_data(1-whalo:0, 1-shalo:m1,:) = sign*halo_data(whalo+ishift:1+ishift:-1,shalo+m2:1+jshift:-1,:)
-    halo_data(1-whalo:0, m1+1:ny+m2,:) = sign*halo_data(whalo+ishift:1+ishift:-1, nyp:1:-1, :)
-    halo_data(1-whalo:0, ny+m2+1:nyp+nhalo,:) = sign*halo_data(whalo+ishift:1+ishift:-1, ny:ny-nhalo+m1+1:-1,:)
+      halo_data(1-whalo:0, 1-shalo:m1,:) = sign*halo_data(whalo+2*ishift-ioff:1+2*ishift-ioff:-1,shalo+m2:1+jshift:-1,:)
+    halo_data(1-whalo:0, m1+1:ny+m2,:) = sign*halo_data(whalo+2*ishift-ioff:1+2*ishift-ioff:-1, nyp:1:-1, :)
+    halo_data(1-whalo:0, ny+m2+1:nyp+nhalo,:) = &
+      sign*halo_data(whalo+2*ishift-ioff:1+2*ishift-ioff:-1, ny:ny-nhalo+m1+1:-1,:)
 
   end subroutine fill_folded_west_halo_r8
 
@@ -579,9 +582,10 @@ contains
     halo_data(1:nxp, 1-shalo:0,:) = halo_data(1:nxp, ny-shalo+1:ny, :) ! south
     halo_data(1:nxp, ny+1:nyp+nhalo,:) = halo_data(1:nxp, 1:nhalo+jshift,:) ! north
     if(m1 .GE. 1-shalo) &
-      halo_data(1-whalo:0, 1-shalo:m1,:) = sign*halo_data(whalo+ishift:1+ishift:-1,shalo+m2:1+jshift:-1,:)
-    halo_data(1-whalo:0, m1+1:ny+m2,:) = sign*halo_data(whalo+ishift:1+ishift:-1, nyp:1:-1, :)
-    halo_data(1-whalo:0, ny+m2+1:nyp+nhalo,:) = sign*halo_data(whalo+ishift:1+ishift:-1, ny:ny-nhalo+m1+1:-1,:)
+      halo_data(1-whalo:0, 1-shalo:m1,:) = sign*halo_data(whalo+2*ishift-ioff:1+2*ishift-ioff:-1,shalo+m2:1+jshift:-1,:)
+    halo_data(1-whalo:0, m1+1:ny+m2,:) = sign*halo_data(whalo+2*ishift-ioff:1+2*ishift-ioff:-1, nyp:1:-1, :)
+    halo_data(1-whalo:0, ny+m2+1:nyp+nhalo,:) = &
+      sign*halo_data(whalo+2*ishift-ioff:1+2*ishift-ioff:-1, ny:ny-nhalo+m1+1:-1,:)
 
   end subroutine fill_folded_west_halo_r4
 
@@ -720,4 +724,3 @@ contains
   end subroutine fill_folded_east_halo_i4
 
 end module fill_halo
-
