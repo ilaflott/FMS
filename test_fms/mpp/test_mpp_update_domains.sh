@@ -34,6 +34,9 @@ test_expect_success "domain updates with single PE" '
 test_expect_success "domain updates with multiple PEs" '
     mpirun -n 2 ./test_mpp_update_domains
 '
+test_expect_success "folded domain updates with four PEs" '
+    mpirun -n 4 ./test_mpp_update_domains
+'
 test_expect_success "corner mosaic with (32 PEs)" '
     mpirun -n 32 ./test_corner_mosaic
 '

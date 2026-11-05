@@ -46,6 +46,9 @@ module test_mpp_update_domains_real
   use mpp_domains_mod, only : SOUTH, SOUTH_WEST, WEST, NORTH_WEST, mpp_define_mosaic_pelist
   use mpp_domains_mod, only : mpp_get_global_domain, ZERO, NINETY, MINUS_NINETY
   use mpp_domains_mod, only : mpp_deallocate_domain
+  use mpp_domains_mod, only : mpp_group_update_type, mpp_create_group_update, mpp_clear_group_update
+  use mpp_domains_mod, only : mpp_do_group_update, mpp_start_group_update, mpp_complete_group_update
+  use mpp_domains_mod, only : mpp_start_update_domains, mpp_complete_update_domains
   use platform_mod
 
   implicit none
@@ -66,8 +69,322 @@ module test_mpp_update_domains_real
   integer :: layout_tripolar(2) = (/0,0/)
   integer :: layout_ensemble(2) = (/0,0/)
   public :: test_halo_update_r8, test_halo_update_r4, test_subset_update_r8, test_subset_update_r4
+  public :: test_fold_overlap_widths
+  public :: test_fold_group_updates
+  public :: test_lower_fold_faces
 
   contains
+
+  subroutine test_lower_fold_faces()
+    integer, parameter :: xlo=7, xhi=22, ylo=-5, yhi=6
+    real(kind=r8_kind), parameter :: unset=-9999
+    type(domain2D) :: domain
+    real(kind=r8_kind), allocatable :: field(:,:), initial(:,:)
+    real(kind=r8_kind) :: expected
+    integer :: fold, stagger, position, xflags, yflags, test_layout(2), width
+    integer :: is, ie, js, je, isd, ied, jsd, jed, ii, jj, source_i, source_j, tangent
+
+    call mpp_define_layout((/xlo,xhi,ylo,yhi/), mpp_npes(), test_layout)
+    do fold = 1,2
+      xflags = CYCLIC_GLOBAL_DOMAIN; yflags = FOLD_SOUTH_EDGE
+      if(fold == 2) then
+        xflags = FOLD_WEST_EDGE; yflags = CYCLIC_GLOBAL_DOMAIN
+      endif
+      call mpp_define_domains((/xlo,xhi,ylo,yhi/), test_layout, domain, &
+           whalo=2, ehalo=2, shalo=2, nhalo=2, xflags=xflags, yflags=yflags, &
+           symmetry=.false., name='lower fold NE faces')
+      do stagger = 0,1
+        position = NORTH
+        if(fold == 2) position = EAST
+        if(stagger == 1) position = CORNER
+        call mpp_get_compute_domain(domain, is, ie, js, je, position=position)
+        call mpp_get_memory_domain(domain, isd, ied, jsd, jed, position=position)
+        allocate(field(isd:ied,jsd:jed), initial(isd:ied,jsd:jed))
+        initial = unset
+        do jj = js,je
+          do ii = is,ie
+            initial(ii,jj) = 1000*ii+jj
+          enddo
+        enddo
+        ! NE faces on a lower fold lie in the first halo and are supplied by the caller.
+        if(fold == 1 .AND. js == ylo) then
+          do ii = isd,ied
+            tangent = xlo-stagger+modulo(ii-xlo+stagger,xhi-xlo+1)
+            tangent = min(tangent,xlo+xhi-stagger-tangent)
+            initial(ii,ylo-1) = 1000*tangent+ylo-1
+          enddo
+        else if(fold == 2 .AND. is == xlo) then
+          do jj = jsd,jed
+            tangent = ylo-stagger+modulo(jj-ylo+stagger,yhi-ylo+1)
+            tangent = min(tangent,ylo+yhi-stagger-tangent)
+            initial(xlo-1,jj) = 1000*(xlo-1)+tangent
+          enddo
+        endif
+        do width = 1,2
+          field = initial
+          call mpp_update_domains(field, domain, position=position, &
+                                  whalo=width, ehalo=width, shalo=width, nhalo=width)
+          do jj = jsd,jed
+            do ii = isd,ied
+              expected = initial(ii,jj)
+              if(ii >= is-width .AND. ii <= ie+width .AND. jj >= js-width .AND. jj <= je+width) then
+                source_i = ii; source_j = jj
+                if(fold == 1) then
+                  if(source_j < ylo) then
+                    source_i = xlo+xhi-stagger-source_i
+                    source_j = 2*(ylo-1)-source_j
+                  endif
+                  source_i = xlo+modulo(source_i-xlo,xhi-xlo+1)
+                  if(source_j == ylo-1) then
+                    tangent = xlo-stagger+modulo(source_i-xlo+stagger,xhi-xlo+1)
+                    source_i = min(tangent,xlo+xhi-stagger-tangent)
+                  endif
+                else
+                  if(source_i < xlo) then
+                    source_i = 2*(xlo-1)-source_i
+                    source_j = ylo+yhi-stagger-source_j
+                  endif
+                  source_j = ylo+modulo(source_j-ylo,yhi-ylo+1)
+                  if(source_i == xlo-1) then
+                    tangent = ylo-stagger+modulo(source_j-ylo+stagger,yhi-ylo+1)
+                    source_j = min(tangent,ylo+yhi-stagger-tangent)
+                  endif
+                endif
+                expected = unset
+                if(source_i >= xlo-1 .AND. source_i <= xhi .AND. &
+                   source_j >= ylo-1 .AND. source_j <= yhi) expected = 1000*source_i+source_j
+              endif
+              if(field(ii,jj) /= expected) then
+                write(*,*) 'lower fold, stagger, width, i, j, actual, expected:', &
+                            fold, stagger, width, ii, jj, field(ii,jj), expected
+                call mpp_error(FATAL, 'test_lower_fold_faces: incorrect NE face halo')
+              endif
+            enddo
+          enddo
+        enddo
+        deallocate(field, initial)
+      enddo
+      call mpp_deallocate_domain(domain)
+    enddo
+  end subroutine test_lower_fold_faces
+
+  subroutine test_fold_group_updates()
+    integer, parameter :: edges(4) = (/FOLD_NORTH_EDGE, FOLD_SOUTH_EDGE, FOLD_EAST_EDGE, FOLD_WEST_EDGE/)
+    integer, parameter :: grids(2) = (/BGRID_NE,CGRID_NE/)
+    real(kind=r8_kind), parameter :: zero=0
+    type(domain2D) :: domain
+    type(mpp_group_update_type) :: group
+    real(kind=r8_kind), allocatable :: scalar(:,:,:), scalar_expected(:,:,:)
+    real(kind=r8_kind), allocatable :: x(:,:,:), y(:,:,:), expected_x(:,:,:), expected_y(:,:,:)
+    real(kind=r8_kind), allocatable :: permuted_x(:,:,:), permuted_y(:,:,:)
+    real(kind=r8_kind), allocatable :: permuted_expected_x(:,:,:), permuted_expected_y(:,:,:)
+    integer :: fold, symmetry_case, grid, indices, mode, xflags, yflags, test_layout(2), xpos, ypos, update_id
+    integer :: bounds(4)
+    integer :: is, ie, js, je, isx, iex, jsx, jex, isy, iey, jsy, jey, ii, jj, level
+
+    call mpp_define_layout((/1,16,1,12/), mpp_npes(), test_layout)
+    do symmetry_case = 0,1
+      do fold = 1,4
+        bounds = (/1,16,1,12/)
+        if(fold > 1) bounds = (/7,22,-5,6/)
+        xflags = CYCLIC_GLOBAL_DOMAIN; yflags = edges(fold)
+        if(fold > 2) then
+          xflags = edges(fold); yflags = CYCLIC_GLOBAL_DOMAIN
+        endif
+        call mpp_define_domains(bounds, test_layout, domain, &
+             whalo=2, ehalo=2, shalo=2, nhalo=2, xflags=xflags, yflags=yflags, &
+             symmetry=symmetry_case == 1, name='fold group updates')
+        call mpp_get_memory_domain(domain, is, ie, js, je)
+        allocate(scalar(is:ie,js:je,2), scalar_expected(is:ie,js:je,2))
+        scalar = zero
+        call mpp_get_compute_domain(domain, is, ie, js, je)
+        do level = 1,2
+          do jj = js,je
+            do ii = is,ie
+              scalar(ii,jj,level) = 1000*ii+10*jj+level
+            enddo
+          enddo
+        enddo
+        scalar_expected = scalar
+        call mpp_update_domains(scalar_expected, domain)
+        call mpp_create_group_update(group, scalar, domain)
+        call mpp_do_group_update(group, domain, zero)
+        call compare_checksums(scalar, scalar_expected, 'fold scalar-only group')
+        call mpp_clear_group_update(group)
+
+        do grid = 1,size(grids)
+          xpos = CORNER; ypos = CORNER
+          if(grids(grid) == CGRID_NE) then
+            xpos = EAST; ypos = NORTH
+          endif
+          call mpp_get_memory_domain(domain, isx, iex, jsx, jex, position=xpos)
+          call mpp_get_memory_domain(domain, isy, iey, jsy, jey, position=ypos)
+          allocate(x(isx:iex,jsx:jex,2), expected_x(isx:iex,jsx:jex,2))
+          allocate(y(isy:iey,jsy:jey,2), expected_y(isy:iey,jsy:jey,2))
+          allocate(permuted_x(2,isx:iex,jsx:jex), permuted_expected_x(2,isx:iex,jsx:jex))
+          allocate(permuted_y(2,isy:iey,jsy:jey), permuted_expected_y(2,isy:iey,jsy:jey))
+          do indices = 1,2
+            call mpp_create_group_update(group, scalar, domain)
+            if(indices == 1) then
+              call mpp_create_group_update(group, x, y, domain, gridtype=grids(grid))
+            else
+              call mpp_create_group_update(group, permuted_x, permuted_y, domain, &
+                                           gridtype=grids(grid), xdim=2, ydim=3)
+            endif
+            do mode = 1,2
+              scalar = zero; x = zero; y = zero
+              do level = 1,2
+                do jj = js,je
+                  do ii = is,ie
+                    scalar(ii,jj,level) = 1000*ii+10*jj+level
+                  enddo
+                enddo
+              enddo
+              call mpp_get_compute_domain(domain, isx, iex, jsx, jex, position=xpos)
+              call mpp_get_compute_domain(domain, isy, iey, jsy, jey, position=ypos)
+              do level = 1,2
+                do jj = jsx,jex
+                  do ii = isx,iex
+                    x(ii,jj,level) = 100*ii+10*jj+level
+                  enddo
+                enddo
+                do jj = jsy,jey
+                  do ii = isy,iey
+                    y(ii,jj,level) = 100*ii-10*jj-level
+                  enddo
+                enddo
+                permuted_x(level,:,:) = x(:,:,level)
+                permuted_y(level,:,:) = y(:,:,level)
+              enddo
+              expected_x = x; expected_y = y
+              call mpp_update_domains(expected_x, expected_y, domain, gridtype=grids(grid))
+              if(indices == 1 .AND. mode == 1) then
+                update_id = mpp_start_update_domains(x, y, domain, gridtype=grids(grid))
+                call mpp_complete_update_domains(update_id, x, y, domain, gridtype=grids(grid))
+                call compare_checksums(x, expected_x, 'fold nonblocking vector x')
+                call compare_checksums(y, expected_y, 'fold nonblocking vector y')
+                do level = 1,2
+                  x(:,:,level) = permuted_x(level,:,:)
+                  y(:,:,level) = permuted_y(level,:,:)
+                enddo
+              endif
+              if(mode == 1) then
+                call mpp_do_group_update(group, domain, zero)
+              else
+                call mpp_start_group_update(group, domain, zero)
+                call mpp_complete_group_update(group, domain, zero)
+              endif
+              call compare_checksums(scalar, scalar_expected, 'fold mixed scalar group')
+              if(indices == 1) then
+                call compare_checksums(x, expected_x, 'fold vector group x')
+                call compare_checksums(y, expected_y, 'fold vector group y')
+              else
+                do level = 1,2
+                  permuted_expected_x(level,:,:) = expected_x(:,:,level)
+                  permuted_expected_y(level,:,:) = expected_y(:,:,level)
+                enddo
+                call compare_checksums(permuted_x, permuted_expected_x, 'fold permuted vector group x')
+                call compare_checksums(permuted_y, permuted_expected_y, 'fold permuted vector group y')
+              endif
+            enddo
+            call mpp_clear_group_update(group)
+          enddo
+          deallocate(x, y, expected_x, expected_y, permuted_x, permuted_y, permuted_expected_x, permuted_expected_y)
+        enddo
+        deallocate(scalar, scalar_expected)
+        call mpp_deallocate_domain(domain)
+      enddo
+    enddo
+  end subroutine test_fold_group_updates
+
+  subroutine test_fold_overlap_widths()
+    integer, parameter :: xlo=7, xhi=22, ylo=-5, yhi=6
+    integer, parameter :: edges(4) = (/FOLD_NORTH_EDGE, FOLD_SOUTH_EDGE, FOLD_EAST_EDGE, FOLD_WEST_EDGE/)
+    integer, parameter :: widths(4,5) = reshape((/2,3,1,2, 1,2,0,1, 1,2,0,1, 0,0,0,0, 2,3,1,2/), (/4,5/))
+    real(kind=r8_kind), parameter :: unset=-9999
+    type(domain2D) :: domain
+    real(kind=r8_kind), allocatable :: field(:,:)
+    real(kind=r8_kind) :: expected
+    integer :: fold, symmetry_case, request, xflags, yflags, test_layout(2)
+    integer :: is, ie, js, je, isd, ied, jsd, jed, ii, jj, source_i, source_j
+    integer :: west_halo, east_halo, south_halo, north_halo
+
+    call mpp_define_layout((/xlo,xhi,ylo,yhi/), mpp_npes(), test_layout)
+    do symmetry_case = 0,1
+      do fold = 1,4
+        xflags = CYCLIC_GLOBAL_DOMAIN
+        yflags = edges(fold)
+        if(fold > 2) then
+          xflags = edges(fold)
+          yflags = CYCLIC_GLOBAL_DOMAIN
+        endif
+        call mpp_define_domains((/xlo,xhi,ylo,yhi/), test_layout, domain, &
+             whalo=2, ehalo=3, shalo=1, nhalo=2, xflags=xflags, yflags=yflags, &
+             symmetry=symmetry_case == 1, name='fold overlap widths')
+        call mpp_get_compute_domain(domain, is, ie, js, je)
+        call mpp_get_memory_domain(domain, isd, ied, jsd, jed)
+        allocate(field(isd:ied,jsd:jed))
+
+        do request = 1,size(widths,2)
+          west_halo = widths(1,request); east_halo = widths(2,request)
+          south_halo = widths(3,request); north_halo = widths(4,request)
+          field = unset
+          do jj = js,je
+            do ii = is,ie
+              field(ii,jj) = 1000*ii+jj
+            enddo
+          enddo
+          call mpp_update_domains(field, domain, whalo=west_halo, ehalo=east_halo, &
+                                  shalo=south_halo, nhalo=north_halo)
+          do jj = jsd,jed
+            do ii = isd,ied
+              expected = unset
+              if(ii >= is-west_halo .AND. ii <= ie+east_halo .AND. &
+                 jj >= js-south_halo .AND. jj <= je+north_halo) then
+                source_i = ii; source_j = jj
+                select case(fold)
+                case(1)
+                  if(source_j > yhi) then
+                    source_i = xlo+xhi-source_i
+                    source_j = 2*yhi+1-source_j
+                  endif
+                case(2)
+                  if(source_j < ylo) then
+                    source_i = xlo+xhi-source_i
+                    source_j = 2*ylo-1-source_j
+                  endif
+                case(3)
+                  if(source_i > xhi) then
+                    source_i = 2*xhi+1-source_i
+                    source_j = ylo+yhi-source_j
+                  endif
+                case(4)
+                  if(source_i < xlo) then
+                    source_i = 2*xlo-1-source_i
+                    source_j = ylo+yhi-source_j
+                  endif
+                end select
+                if(fold <= 2) then
+                  source_i = xlo+modulo(source_i-xlo,xhi-xlo+1)
+                else
+                  source_j = ylo+modulo(source_j-ylo,yhi-ylo+1)
+                endif
+                if(source_i >= xlo .AND. source_i <= xhi .AND. source_j >= ylo .AND. source_j <= yhi) &
+                  expected = 1000*source_i+source_j
+              endif
+              if(field(ii,jj) /= expected) then
+                write(*,*) 'fold, symmetry, request, i, j, actual, expected:', &
+                            fold, symmetry_case, request, ii, jj, field(ii,jj), expected
+                call mpp_error(FATAL, 'test_fold_overlap_widths: incorrect halo value')
+              endif
+            enddo
+          enddo
+        enddo
+        deallocate(field)
+        call mpp_deallocate_domain(domain)
+      enddo
+    enddo
+  end subroutine test_fold_overlap_widths
 
   !> Perform simple addition on 64-bit real arrays in different domain configurations and update the domains
   subroutine test_halo_update_r8( domain_type )
@@ -134,19 +451,19 @@ module test_mpp_update_domains_real
              shalo=shalo, nhalo=nhalo, xflags=CYCLIC_GLOBAL_DOMAIN, yflags=FOLD_NORTH_EDGE, &
              name=domain_type, symmetry = is_symmetry  )
         call fill_folded_north_halo(globalr8, 0, 0, 0, 0, 1)
-      case( 'Folded-south symmetry' )
+      case( 'Folded-south', 'Folded-south symmetry' )
         call mpp_define_layout( (/1,nx,1,ny/), npes, layout )
         call mpp_define_domains( (/1,nx,1,ny/), layout, domain, whalo=whalo, ehalo=ehalo,   &
              shalo=shalo, nhalo=nhalo, xflags=CYCLIC_GLOBAL_DOMAIN, yflags=FOLD_SOUTH_EDGE, &
              name=domain_type, symmetry = is_symmetry  )
         call fill_folded_south_halo(globalr8, 0, 0, 0, 0, 1)
-      case( 'Folded-west symmetry' )
+      case( 'Folded-west', 'Folded-west symmetry' )
         call mpp_define_layout( (/1,nx,1,ny/), npes, layout )
         call mpp_define_domains( (/1,nx,1,ny/), layout, domain, whalo=whalo, ehalo=ehalo,   &
              shalo=shalo, nhalo=nhalo, xflags=FOLD_WEST_EDGE, yflags=CYCLIC_GLOBAL_DOMAIN, &
              name=domain_type, symmetry = is_symmetry  )
         call fill_folded_west_halo(globalr8, 0, 0, 0, 0, 1)
-      case( 'Folded-east symmetry' )
+      case( 'Folded-east', 'Folded-east symmetry' )
         call mpp_define_layout( (/1,nx,1,ny/), npes, layout )
         call mpp_define_domains( (/1,nx,1,ny/), layout, domain, whalo=whalo, ehalo=ehalo,   &
              shalo=shalo, nhalo=nhalo, xflags=FOLD_EAST_EDGE, yflags=CYCLIC_GLOBAL_DOMAIN, &
@@ -259,15 +576,17 @@ module test_mpp_update_domains_real
       globalr8(nx+xhalo,          ny+1:ny+yhalo,:) = -globalr8(nx-xhalo,             ny-1:ny-yhalo:-1,:)
     case ('Folded-north symmetry', 'Masked symmetry' )
       call fill_folded_north_halo(globalr8, 1, 1, 1, 1, -1)
-    case ('Folded-south symmetry' )
+    case ('Folded-south', 'Folded-south symmetry' )
       folded_south = .true.
-      call fill_folded_south_halo(globalr8, 1, 1, 1, 1, -1)
-    case ('Folded-west symmetry' )
+      call fill_folded_south_halo(globalr8, 1, 1, shift, shift, -1)
+      if(.NOT. is_symmetry) globalr8(:,0,:) = 0
+    case ('Folded-west', 'Folded-west symmetry' )
       folded_west = .true.
-      call fill_folded_west_halo(globalr8, 1, 1, 1, 1, -1)
-    case ('Folded-east symmetry' )
+      call fill_folded_west_halo(globalr8, 1, 1, shift, shift, -1)
+      if(.NOT. is_symmetry) globalr8(0,:,:) = 0
+    case ('Folded-east', 'Folded-east symmetry' )
       folded_east = .true.
-      call fill_folded_east_halo(globalr8, 1, 1, 1, 1, -1)
+      call fill_folded_east_halo(globalr8, 1, 1, shift, shift, -1)
     case default
       call mpp_error( FATAL, 'TEST_MPP_DOMAINS: no such test: '//domain_type )
     end select
@@ -295,21 +614,21 @@ module test_mpp_update_domains_real
     ! redundant points must be equal and opposite
 
     if(folded_south) then
-      globalr8(nx/2+shift,                1,:) = 0.0  !pole points must have 0 velocity
-      globalr8(nx+shift  ,                1,:) = 0.0  !pole points must have 0 velocity
-      globalr8(nx/2+1+shift:nx-1+shift,   1,:) = -globalr8(nx/2-1+shift:1+shift:-1, 1,:)
-      globalr8(1-whalo:shift,             1,:) = -globalr8(nx-whalo+1:nx+shift,     1,:)
-      globalr8(nx+1+shift:nx+ehalo+shift, 1,:) = -globalr8(1+shift:ehalo+shift,     1,:)
+      globalr8(nx/2+shift,            shift,:) = 0.0  !pole points must have 0 velocity
+      globalr8(nx+shift  ,            shift,:) = 0.0  !pole points must have 0 velocity
+      globalr8(nx/2+1+shift:nx-1+shift,shift,:) = -globalr8(nx/2-1+shift:1+shift:-1, shift,:)
+      globalr8(1-whalo:shift,         shift,:) = -globalr8(nx-whalo+1:nx+shift,     shift,:)
+      globalr8(nx+1+shift:nx+ehalo+shift,shift,:) = -globalr8(1+shift:ehalo+shift,   shift,:)
       !--- the following will fix the +0/-0 problem on altix
-      if(shalo >0) globalr8(shift,1,:) = 0.0  !pole points must have 0 velocity
+      if(shalo >0) globalr8(shift,shift,:) = 0.0  !pole points must have 0 velocity
     else if(folded_west) then
-      globalr8(1, ny/2+shift, :) = 0.0 !pole points must have 0 velocity
-      globalr8(1, ny+shift,   :) = 0.0 !pole points must have 0 velocity
-      globalr8(1, ny/2+1+shift:ny-1+shift,   :) = -globalr8(1, ny/2-1+shift:1+shift:-1, :)
-      globalr8(1, 1-shalo:shift,             :) = -globalr8(1, ny-shalo+1:ny+shift,     :)
-      globalr8(1, ny+1+shift:ny+nhalo+shift, :) = -globalr8(1, 1+shift:nhalo+shift,     :)
+      globalr8(shift, ny/2+shift, :) = 0.0 !pole points must have 0 velocity
+      globalr8(shift, ny+shift,   :) = 0.0 !pole points must have 0 velocity
+      globalr8(shift, ny/2+1+shift:ny-1+shift,:) = -globalr8(shift, ny/2-1+shift:1+shift:-1,:)
+      globalr8(shift, 1-shalo:shift,          :) = -globalr8(shift, ny-shalo+1:ny+shift,    :)
+      globalr8(shift, ny+1+shift:ny+nhalo+shift,:) = -globalr8(shift, 1+shift:nhalo+shift,  :)
       !--- the following will fix the +0/-0 problem on altix
-      if(whalo>0) globalr8(1, shift, :) = 0.0  !pole points must have 0 velocity
+      if(whalo>0) globalr8(shift, shift, :) = 0.0  !pole points must have 0 velocity
     else if(folded_east) then
       globalr8(nx+shift, ny/2+shift, :) = 0.0 !pole points must have 0 velocity
       globalr8(nx+shift, ny+shift,   :) = 0.0 !pole points must have 0 velocity
@@ -398,15 +717,17 @@ module test_mpp_update_domains_real
     case ('Folded-north symmetry')
       call fill_folded_north_halo(global1r8, 1, 0, 1, 0, -1)
       call fill_folded_north_halo(global2r8, 0, 1, 0, 1, -1)
-    case ('Folded-south symmetry')
-      call fill_folded_south_halo(global1r8, 1, 0, 1, 0, -1)
-      call fill_folded_south_halo(global2r8, 0, 1, 0, 1, -1)
-    case ('Folded-west symmetry')
-      call fill_folded_west_halo(global1r8, 1, 0, 1, 0, -1)
-      call fill_folded_west_halo(global2r8, 0, 1, 0, 1, -1)
-    case ('Folded-east symmetry')
-      call fill_folded_east_halo(global1r8, 1, 0, 1, 0, -1)
-      call fill_folded_east_halo(global2r8, 0, 1, 0, 1, -1)
+    case ('Folded-south', 'Folded-south symmetry')
+      call fill_folded_south_halo(global1r8, 1, 0, shift, 0, -1)
+      call fill_folded_south_halo(global2r8, 0, 1, 0, shift, -1)
+      if(.NOT. is_symmetry) global2r8(:,0,:) = 0
+    case ('Folded-west', 'Folded-west symmetry')
+      call fill_folded_west_halo(global1r8, 1, 0, shift, 0, -1)
+      call fill_folded_west_halo(global2r8, 0, 1, 0, shift, -1)
+      if(.NOT. is_symmetry) global1r8(0,:,:) = 0
+    case ('Folded-east', 'Folded-east symmetry')
+      call fill_folded_east_halo(global1r8, 1, 0, shift, 0, -1)
+      call fill_folded_east_halo(global2r8, 0, 1, 0, shift, -1)
     case default
        call mpp_error( FATAL, 'test_halo_update_r8: invalid test name: '//domain_type )
     end select
@@ -428,13 +749,13 @@ module test_mpp_update_domains_real
 
     ! redundant points must be equal and opposite
     if(folded_south) then
-      global2r8(nx/2+1:nx,     1,:) = -global2r8(nx/2:1:-1, 1,:)
-      global2r8(1-whalo:0,     1,:) = -global2r8(nx-whalo+1:nx, 1, :)
-      global2r8(nx+1:nx+ehalo, 1,:) = -global2r8(1:ehalo,       1, :)
+      global2r8(nx/2+1:nx, shift,:) = -global2r8(nx/2:1:-1, shift,:)
+      global2r8(1-whalo:0, shift,:) = -global2r8(nx-whalo+1:nx, shift,:)
+      global2r8(nx+1:nx+ehalo,shift,:) = -global2r8(1:ehalo, shift,:)
     else if(folded_west) then
-      global1r8(1, ny/2+1:ny,     :) = -global1r8(1, ny/2:1:-1,     :)
-      global1r8(1, 1-shalo:0,     :) = -global1r8(1, ny-shalo+1:ny, :)
-      global1r8(1, ny+1:ny+nhalo, :) = -global1r8(1, 1:nhalo,       :)
+      global1r8(shift, ny/2+1:ny, :) = -global1r8(shift, ny/2:1:-1, :)
+      global1r8(shift, 1-shalo:0, :) = -global1r8(shift, ny-shalo+1:ny,:)
+      global1r8(shift, ny+1:ny+nhalo,:) = -global1r8(shift, 1:nhalo, :)
     else if(folded_east) then
       global1r8(nx+shift, ny/2+1:ny,     :) = -global1r8(nx+shift, ny/2:1:-1,     :)
       global1r8(nx+shift, 1-shalo:0,     :) = -global1r8(nx+shift, ny-shalo+1:ny, :)
@@ -531,19 +852,19 @@ module test_mpp_update_domains_real
             shalo=shalo, nhalo=nhalo, xflags=CYCLIC_GLOBAL_DOMAIN, yflags=FOLD_NORTH_EDGE, &
             name=domain_type, symmetry = is_symmetry  )
      call fill_folded_north_halo(globalr4, 0, 0, 0, 0, 1)
-   case( 'Folded-south symmetry' )
+   case( 'Folded-south', 'Folded-south symmetry' )
      call mpp_define_layout( (/1,nx,1,ny/), npes, layout )
      call mpp_define_domains( (/1,nx,1,ny/), layout, domain, whalo=whalo, ehalo=ehalo,   &
             shalo=shalo, nhalo=nhalo, xflags=CYCLIC_GLOBAL_DOMAIN, yflags=FOLD_SOUTH_EDGE, &
             name=domain_type, symmetry = is_symmetry  )
      call fill_folded_south_halo(globalr4, 0, 0, 0, 0, 1)
-   case( 'Folded-west symmetry' )
+   case( 'Folded-west', 'Folded-west symmetry' )
      call mpp_define_layout( (/1,nx,1,ny/), npes, layout )
      call mpp_define_domains( (/1,nx,1,ny/), layout, domain, whalo=whalo, ehalo=ehalo,   &
             shalo=shalo, nhalo=nhalo, xflags=FOLD_WEST_EDGE, yflags=CYCLIC_GLOBAL_DOMAIN, &
             name=domain_type, symmetry = is_symmetry  )
      call fill_folded_west_halo(globalr4, 0, 0, 0, 0, 1)
-   case( 'Folded-east symmetry' )
+   case( 'Folded-east', 'Folded-east symmetry' )
      call mpp_define_layout( (/1,nx,1,ny/), npes, layout )
      call mpp_define_domains( (/1,nx,1,ny/), layout, domain, whalo=whalo, ehalo=ehalo,   &
             shalo=shalo, nhalo=nhalo, xflags=FOLD_EAST_EDGE, yflags=CYCLIC_GLOBAL_DOMAIN, &
@@ -653,15 +974,17 @@ module test_mpp_update_domains_real
      globalr4(nx+xhalo,          ny+1:ny+yhalo,:) = -globalr4(nx-xhalo,             ny-1:ny-yhalo:-1,:)
    case ('Folded-north symmetry', 'Masked symmetry' )
      call fill_folded_north_halo(globalr4, 1, 1, 1, 1, -1)
-   case ('Folded-south symmetry' )
+   case ('Folded-south', 'Folded-south symmetry' )
      folded_south = .true.
-     call fill_folded_south_halo(globalr4, 1, 1, 1, 1, -1)
-   case ('Folded-west symmetry' )
+     call fill_folded_south_halo(globalr4, 1, 1, shift, shift, -1)
+     if(.NOT. is_symmetry) globalr4(:,0,:) = 0
+   case ('Folded-west', 'Folded-west symmetry' )
      folded_west = .true.
-     call fill_folded_west_halo(globalr4, 1, 1, 1, 1, -1)
-   case ('Folded-east symmetry' )
+     call fill_folded_west_halo(globalr4, 1, 1, shift, shift, -1)
+     if(.NOT. is_symmetry) globalr4(0,:,:) = 0
+   case ('Folded-east', 'Folded-east symmetry' )
      folded_east = .true.
-     call fill_folded_east_halo(globalr4, 1, 1, 1, 1, -1)
+     call fill_folded_east_halo(globalr4, 1, 1, shift, shift, -1)
    case default
      call mpp_error( FATAL, 'TEST_MPP_DOMAINS: no such test: '//domain_type )
    end select
@@ -688,21 +1011,21 @@ module test_mpp_update_domains_real
 
    ! redundant points must be equal and opposite
    if(folded_south) then
-     globalr4(nx/2+shift,                1,:) = 0.  !pole points must have 0 velocity
-     globalr4(nx+shift  ,                1,:) = 0.  !pole points must have 0 velocity
-     globalr4(nx/2+1+shift:nx-1+shift,   1,:) = -globalr4(nx/2-1+shift:1+shift:-1, 1,:)
-     globalr4(1-whalo:shift,             1,:) = -globalr4(nx-whalo+1:nx+shift,     1,:)
-     globalr4(nx+1+shift:nx+ehalo+shift, 1,:) = -globalr4(1+shift:ehalo+shift,     1,:)
+     globalr4(nx/2+shift,            shift,:) = 0.  !pole points must have 0 velocity
+     globalr4(nx+shift  ,            shift,:) = 0.  !pole points must have 0 velocity
+     globalr4(nx/2+1+shift:nx-1+shift,shift,:) = -globalr4(nx/2-1+shift:1+shift:-1, shift,:)
+     globalr4(1-whalo:shift,         shift,:) = -globalr4(nx-whalo+1:nx+shift,     shift,:)
+     globalr4(nx+1+shift:nx+ehalo+shift,shift,:) = -globalr4(1+shift:ehalo+shift,   shift,:)
 
-     if(shalo >0) globalr4(shift,1,:) = 0.0  !pole points must have 0 velocity
+     if(shalo >0) globalr4(shift,shift,:) = 0.0  !pole points must have 0 velocity
    else if(folded_west) then
-     globalr4(1, ny/2+shift, :) = 0.0 !pole points must have 0 velocity
-     globalr4(1, ny+shift,   :) = 0.0 !pole points must have 0 velocity
-     globalr4(1, ny/2+1+shift:ny-1+shift,   :) = -globalr4(1, ny/2-1+shift:1+shift:-1, :)
-     globalr4(1, 1-shalo:shift,             :) = -globalr4(1, ny-shalo+1:ny+shift,     :)
-     globalr4(1, ny+1+shift:ny+nhalo+shift, :) = -globalr4(1, 1+shift:nhalo+shift,     :)
+     globalr4(shift, ny/2+shift, :) = 0.0 !pole points must have 0 velocity
+     globalr4(shift, ny+shift,   :) = 0.0 !pole points must have 0 velocity
+     globalr4(shift, ny/2+1+shift:ny-1+shift,:) = -globalr4(shift, ny/2-1+shift:1+shift:-1,:)
+     globalr4(shift, 1-shalo:shift,          :) = -globalr4(shift, ny-shalo+1:ny+shift,    :)
+     globalr4(shift, ny+1+shift:ny+nhalo+shift,:) = -globalr4(shift, 1+shift:nhalo+shift,  :)
      !--- the following will fix the +0/-0 problem on altix
-     if(whalo>0) globalr4(1, shift, :) = 0.0  !pole points must have 0 velocity
+     if(whalo>0) globalr4(shift, shift, :) = 0.0  !pole points must have 0 velocity
    else if(folded_east) then
      globalr4(nx+shift, ny/2+shift, :) = 0.0 !pole points must have 0 velocity
      globalr4(nx+shift, ny+shift,   :) = 0.0 !pole points must have 0 velocity
@@ -790,15 +1113,17 @@ module test_mpp_update_domains_real
    case ('Folded-north symmetry')
      call fill_folded_north_halo(global1r4, 1, 0, 1, 0, -1)
      call fill_folded_north_halo(global2r4, 0, 1, 0, 1, -1)
-   case ('Folded-south symmetry')
-     call fill_folded_south_halo(global1r4, 1, 0, 1, 0, -1)
-     call fill_folded_south_halo(global2r4, 0, 1, 0, 1, -1)
-   case ('Folded-west symmetry')
-     call fill_folded_west_halo(global1r4, 1, 0, 1, 0, -1)
-     call fill_folded_west_halo(global2r4, 0, 1, 0, 1, -1)
-   case ('Folded-east symmetry')
-     call fill_folded_east_halo(global1r4, 1, 0, 1, 0, -1)
-     call fill_folded_east_halo(global2r4, 0, 1, 0, 1, -1)
+   case ('Folded-south', 'Folded-south symmetry')
+     call fill_folded_south_halo(global1r4, 1, 0, shift, 0, -1)
+     call fill_folded_south_halo(global2r4, 0, 1, 0, shift, -1)
+     if(.NOT. is_symmetry) global2r4(:,0,:) = 0
+   case ('Folded-west', 'Folded-west symmetry')
+     call fill_folded_west_halo(global1r4, 1, 0, shift, 0, -1)
+     call fill_folded_west_halo(global2r4, 0, 1, 0, shift, -1)
+     if(.NOT. is_symmetry) global1r4(0,:,:) = 0
+   case ('Folded-east', 'Folded-east symmetry')
+     call fill_folded_east_halo(global1r4, 1, 0, shift, 0, -1)
+     call fill_folded_east_halo(global2r4, 0, 1, 0, shift, -1)
    case default
      call mpp_error( FATAL, 'TEST_MPP_DOMAINS: no such test: '//domain_type )
    end select
@@ -820,13 +1145,13 @@ module test_mpp_update_domains_real
 
    ! redundant points must be equal and opposite
    if(folded_south) then
-     global2r4(nx/2+1:nx,     1,:) = -global2r4(nx/2:1:-1, 1,:)
-     global2r4(1-whalo:0,     1,:) = -global2r4(nx-whalo+1:nx, 1, :)
-     global2r4(nx+1:nx+ehalo, 1,:) = -global2r4(1:ehalo,       1, :)
+     global2r4(nx/2+1:nx, shift,:) = -global2r4(nx/2:1:-1, shift,:)
+     global2r4(1-whalo:0, shift,:) = -global2r4(nx-whalo+1:nx, shift,:)
+     global2r4(nx+1:nx+ehalo,shift,:) = -global2r4(1:ehalo, shift,:)
    else if(folded_west) then
-     global1r4(1, ny/2+1:ny,     :) = -global1r4(1, ny/2:1:-1,     :)
-     global1r4(1, 1-shalo:0,     :) = -global1r4(1, ny-shalo+1:ny, :)
-     global1r4(1, ny+1:ny+nhalo, :) = -global1r4(1, 1:nhalo,       :)
+     global1r4(shift, ny/2+1:ny, :) = -global1r4(shift, ny/2:1:-1, :)
+     global1r4(shift, 1-shalo:0, :) = -global1r4(shift, ny-shalo+1:ny,:)
+     global1r4(shift, ny+1:ny+nhalo,:) = -global1r4(shift, 1:nhalo, :)
    else if(folded_east) then
      global1r4(nx+shift, ny/2+1:ny,     :) = -global1r4(nx+shift, ny/2:1:-1,     :)
      global1r4(nx+shift, 1-shalo:0,     :) = -global1r4(nx+shift, ny-shalo+1:ny, :)
