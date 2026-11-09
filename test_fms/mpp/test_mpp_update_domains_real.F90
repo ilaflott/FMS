@@ -73,8 +73,125 @@ module test_mpp_update_domains_real
   public :: test_fold_group_updates
   public :: test_lower_fold_faces
   public :: test_negative_fold_origins
+  public :: test_lower_fold_vector_faces
 
   contains
+
+  subroutine test_lower_fold_vector_faces()
+    integer, parameter :: xlo=7, xhi=22, ylo=-5, yhi=6
+    integer, parameter :: grids(2) = (/BGRID_NE,CGRID_NE/)
+    real(kind=r8_kind), parameter :: unset=-9999, zero=0
+    type(domain2D) :: domain
+    type(mpp_group_update_type) :: group
+    real(kind=r8_kind), allocatable :: fieldx(:,:), fieldy(:,:)
+    real(kind=r8_kind) :: expected, actual
+    integer :: fold, grid, mode, width, component, depth, update_id, xflags, yflags, test_layout(2)
+    integer :: is, ie, js, je, isd, ied, jsd, jed, ii, jj, source_i, source_j
+    integer :: line, first, last, tangent_lo, tangent_hi, tangent, mirror, source_t, source_n, sign
+    logical :: normal_face, tangent_face
+
+    call mpp_define_layout((/xlo,xhi,ylo,yhi/), mpp_npes(), test_layout)
+    do fold=1,2
+      xflags = CYCLIC_GLOBAL_DOMAIN; yflags = FOLD_SOUTH_EDGE
+      if(fold == 2) then
+        xflags = FOLD_WEST_EDGE; yflags = CYCLIC_GLOBAL_DOMAIN
+      endif
+      call mpp_define_domains((/xlo,xhi,ylo,yhi/), test_layout, domain, xhalo=2, yhalo=2, &
+           xflags=xflags, yflags=yflags, symmetry=.false., name='nonzero lower vector faces')
+      call mpp_get_compute_domain(domain, is, ie, js, je)
+      call mpp_get_memory_domain(domain, isd, ied, jsd, jed)
+      allocate(fieldx(isd:ied,jsd:jed), fieldy(isd:ied,jsd:jed))
+      line = ylo-1; tangent_lo = xlo; tangent_hi = xhi
+      first = is; last = ie
+      if(fold == 2) then
+        line = xlo-1; tangent_lo = ylo; tangent_hi = yhi
+        first = js; last = je
+      endif
+      do grid=1,size(grids)
+        do width=1,2
+          do mode=1,4
+            fieldx = unset; fieldy = unset
+            do jj=js,je
+              do ii=is,ie
+                fieldx(ii,jj) = 1000*ii+jj
+                fieldy(ii,jj) = 100000+1000*ii+jj
+              enddo
+            enddo
+            ! Supply independent, nonzero NE faces; leave their redundant half inconsistent.
+            if(fold == 1 .AND. js == ylo) then
+              do ii=is,ie
+                fieldy(ii,line) = 100000+1000*ii+line
+                if(grids(grid) == BGRID_NE) fieldx(ii,line) = 1000*ii+line
+              enddo
+            else if(fold == 2 .AND. is == xlo) then
+              do jj=js,je
+                fieldx(line,jj) = 1000*line+jj
+                if(grids(grid) == BGRID_NE) fieldy(line,jj) = 100000+1000*line+jj
+              enddo
+            endif
+            select case(mode)
+            case(1)
+              call mpp_update_domains(fieldx, fieldy, domain, gridtype=grids(grid), &
+                   whalo=width, ehalo=width, shalo=width, nhalo=width)
+            case(2)
+              update_id = mpp_start_update_domains(fieldx, fieldy, domain, gridtype=grids(grid), &
+                   whalo=width, ehalo=width, shalo=width, nhalo=width)
+              call mpp_complete_update_domains(update_id, fieldx, fieldy, domain, gridtype=grids(grid), &
+                   whalo=width, ehalo=width, shalo=width, nhalo=width)
+            case(3,4)
+              call mpp_create_group_update(group, fieldx, fieldy, domain, gridtype=grids(grid), &
+                   whalo=width, ehalo=width, shalo=width, nhalo=width)
+              if(mode == 3) then
+                call mpp_do_group_update(group, domain, zero)
+              else
+                call mpp_start_group_update(group, domain, zero)
+                call mpp_complete_group_update(group, domain, zero)
+              endif
+              call mpp_clear_group_update(group)
+            end select
+            do component=1,2
+              normal_face = grids(grid) == BGRID_NE .OR. component == 3-fold
+              tangent_face = grids(grid) == BGRID_NE .OR. .NOT. normal_face
+              mirror = tangent_lo+tangent_hi
+              if(tangent_face) mirror = mirror-1
+              do depth=0,width-1
+                do tangent=max(first,tangent_lo),min(last,tangent_hi-1)
+                  ii = tangent; jj = line-depth
+                  if(fold == 2) then
+                    ii = line-depth; jj = tangent
+                  endif
+                  if(ii < is-width .OR. ii > ie+width .OR. jj < js-width .OR. jj > je+width) cycle
+                  source_n = line+depth; source_t = mirror-tangent; sign = -1
+                  if(.NOT. normal_face) source_n = source_n+1
+                  if(depth == 0 .AND. normal_face) then
+                    source_t = tangent; sign = 1
+                    if(tangent > mirror-tangent) then
+                      source_t = mirror-tangent; sign = -1
+                    endif
+                    if(grids(grid) == BGRID_NE .AND. tangent == mirror-tangent) sign = 0
+                  endif
+                  source_i = source_t; source_j = source_n
+                  if(fold == 2) then
+                    source_i = source_n; source_j = source_t
+                  endif
+                  expected = sign*(100000*(component-1)+1000*source_i+source_j)
+                  actual = fieldx(ii,jj)
+                  if(component == 2) actual = fieldy(ii,jj)
+                  if(actual /= expected) then
+                    write(*,*) 'lower vector fold, grid, width, mode, component, i, j, actual, expected:', &
+                         fold, grid, width, mode, component, ii, jj, actual, expected
+                    call mpp_error(FATAL, 'test_lower_fold_vector_faces: incorrect signed face or ghost')
+                  endif
+                enddo
+              enddo
+            enddo
+          enddo
+        enddo
+      enddo
+      deallocate(fieldx, fieldy)
+      call mpp_deallocate_domain(domain)
+    enddo
+  end subroutine test_lower_fold_vector_faces
 
   subroutine test_negative_fold_origins()
     integer, parameter :: tangent_lo=-20, tangent_hi=-5
