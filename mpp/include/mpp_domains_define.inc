@@ -3922,7 +3922,8 @@ end subroutine check_message_size
        if( overlap%count > 0) then
           nsend = nsend + 1
           if(nsend > size(overlapList(:)) ) then
-             call mpp_error(NOTE, 'mpp_domains_define.inc(compute_overlaps_fold_west): overlapList for send js expanded')
+             call mpp_error(NOTE, &
+                  'mpp_domains_define.inc(compute_overlaps_fold_west): overlapList for send js expanded')
              call expand_update_overlap_list(overlapList, nlist)
           endif
           call add_update_overlap(overlapList(nsend), overlap)
@@ -4222,7 +4223,8 @@ end subroutine check_message_size
        if( overlap%count > 0) then
           nrecv = nrecv + 1
           if(nrecv > size(overlapList(:)) )then
-             call mpp_error(NOTE, 'mpp_domains_define.inc(compute_overlaps_fold_west): overlapList for recv js expanded')
+             call mpp_error(NOTE, &
+                  'mpp_domains_define.inc(compute_overlaps_fold_west): overlapList for recv js expanded')
              call expand_update_overlap_list(overlapList, nlist)
           endif
           call add_update_overlap(overlapList(nrecv), overlap)
@@ -4550,7 +4552,8 @@ end subroutine check_message_size
        if( overlap%count > 0) then
           nsend = nsend + 1
           if(nsend > size(overlapList(:)) ) then
-             call mpp_error(NOTE, 'mpp_domains_define.inc(compute_overlaps_fold_east): overlapList for send js expanded')
+             call mpp_error(NOTE, &
+                  'mpp_domains_define.inc(compute_overlaps_fold_east): overlapList for send js expanded')
              call expand_update_overlap_list(overlapList, nlist)
           endif
           call add_update_overlap(overlapList(nsend), overlap)
@@ -4750,7 +4753,8 @@ end subroutine check_message_size
                   dir, joff, domain%y(tMe)%cyclic, folded, symmetry=domain%symmetry)
           endif
           if(je2 .GE. js2) then
-             if(ieg .GE. is2 .AND. ieg .LE. ie2 .AND. ied2 == ieg  .AND. (position == CORNER .OR. position == EAST)) then
+             if(ieg .GE. is2 .AND. ieg .LE. ie2 .AND. ied2 == ieg .AND. &
+                (position == CORNER .OR. position == EAST)) then
                 call fill_overlap_recv_fold_east(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, jsg, &
                      jeg, dir, jshift, position, joff, middle, symmetry=domain%symmetry)
              else
@@ -4828,7 +4832,8 @@ end subroutine check_message_size
           if(je3 .GE. js3) call fill_overlap_recv_nofold_east(overlap, domain, m, is3, ie3, js3, je3, isd3, ied3, &
                jsd3, jed3, jsg, jeg, dir, joff, domain%y(tMe)%cyclic, folded)
           if(je2 .GE. js2) then
-             if(ieg .GE. is2 .AND. ieg .LE. ie2 .AND. ied2 == ieg  .AND. (position == CORNER .OR. position == EAST)) then
+             if(ieg .GE. is2 .AND. ieg .LE. ie2 .AND. ied2 == ieg .AND. &
+                (position == CORNER .OR. position == EAST)) then
                 call fill_overlap_recv_fold_east(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, jsg, &
                      jeg, dir, jshift, position, joff, middle)
              else
@@ -4840,7 +4845,8 @@ end subroutine check_message_size
        if( overlap%count > 0) then
           nrecv = nrecv + 1
           if(nrecv > size(overlapList(:)) )then
-             call mpp_error(NOTE, 'mpp_domains_define.inc(compute_overlaps_fold_east): overlapList for recv js expanded')
+             call mpp_error(NOTE, &
+                  'mpp_domains_define.inc(compute_overlaps_fold_east): overlapList for recv js expanded')
              call expand_update_overlap_list(overlapList, nlist)
           endif
           call add_update_overlap(overlapList(nrecv), overlap)
