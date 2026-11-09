@@ -525,8 +525,8 @@ subroutine MPP_DO_GROUP_UPDATE_(group, domain, d_type, omp_offload)
         end if
      end if
   else if( BTEST(domain%fold,SOUTH) .OR. BTEST(domain%fold,WEST) .OR. BTEST(domain%fold,EAST) ) then
-     call mpp_error(FATAL, "MPP_DO_GROUP_UPDATE: this interface does not support folded_south, " // &
-          "folded_west of folded_east, contact developer")
+     if(nvector > 0 .AND. .NOT.BTEST(flags_v,SCALAR_BIT)) &
+          call GROUP_FOLD_CORRECTION_(group, domain, use_device_ptr)
   endif
 
   if(nsend>0) then
@@ -742,8 +742,8 @@ subroutine MPP_COMPLETE_GROUP_UPDATE_(group, domain, d_type)
         end if
      end if
   else if( BTEST(domain%fold,SOUTH) .OR. BTEST(domain%fold,WEST) .OR. BTEST(domain%fold,EAST) ) then
-     call mpp_error(FATAL, "MPP_COMPLETE_GROUP_UPDATE: this interface does not support folded_south, " // &
-          "folded_west of folded_east, contact developer")
+     if(nvector > 0 .AND. .NOT.BTEST(flags_v,SCALAR_BIT)) &
+          call GROUP_FOLD_CORRECTION_(group, domain, use_device_ptr)
   endif
 
   if(nsend>0) then
@@ -809,6 +809,97 @@ subroutine MPP_RESET_GROUP_UPDATE_FIELD_V_(group, fieldx, fieldy)
   group%addrs_x(group%reset_index_v) = c_loc(fieldx)
   group%addrs_y(group%reset_index_v) = c_loc(fieldy)
 end subroutine MPP_RESET_GROUP_UPDATE_FIELD_V_
+
+subroutine GROUP_FOLD_CORRECTION_(group, domain, use_device_ptr)
+  type(mpp_group_update_type), intent(in), target :: group
+  type(domain2D), intent(in) :: domain
+  logical, intent(in) :: use_device_ptr
+
+  integer :: shift, fold_line, fold_dir, tangent_dir, normal_field
+  integer :: first, last, lower, upper, normal_lower, normal_upper
+  integer :: pole, midpoint, threshold, offset, last_point
+  logical :: transpose_axes, correct_lower
+
+  if(group%gridtype /= BGRID_NE .AND. group%gridtype /= CGRID_NE) return
+  shift = 0
+  if(domain%symmetry) shift = 1
+  transpose_axes = .NOT. BTEST(domain%fold,SOUTH)
+
+  if(transpose_axes) then
+    fold_dir = 1
+    fold_line = domain%x(1)%global%end+shift
+    if(BTEST(domain%fold,WEST)) then
+      fold_dir = 5
+      fold_line = domain%x(1)%global%begin+shift-1
+    endif
+    tangent_dir = 3
+    normal_field = FIELD_X
+    first = domain%y(1)%global%begin
+    last = domain%y(1)%global%end
+    lower = domain%y(1)%compute%begin-group%shalo_v
+    upper = domain%y(1)%compute%end+group%nhalo_v
+    normal_lower = domain%x(1)%compute%begin-group%whalo_v
+    normal_upper = domain%x(1)%compute%end+group%ehalo_v+shift
+    correct_lower = group%recv_x(fold_dir) .OR. group%recv_x(tangent_dir)
+  else
+    fold_dir = 3
+    fold_line = domain%y(1)%global%begin+shift-1
+    tangent_dir = 5
+    normal_field = FIELD_Y
+    first = domain%x(1)%global%begin
+    last = domain%x(1)%global%end
+    lower = domain%x(1)%compute%begin-group%whalo_v
+    upper = domain%x(1)%compute%end+group%ehalo_v
+    normal_lower = domain%y(1)%compute%begin-group%shalo_v
+    normal_upper = domain%y(1)%compute%end+group%nhalo_v+shift
+    correct_lower = group%recv_y(fold_dir) .OR. group%recv_y(tangent_dir)
+  endif
+  if(fold_line < normal_lower .OR. fold_line > normal_upper) return
+
+  if(group%gridtype == BGRID_NE) then
+    midpoint = (last-first+1)/2
+    do pole = first-1+shift,last+shift,midpoint
+      if(pole < lower .OR. pole > upper+shift) cycle
+      if(transpose_axes) then
+        call SET_ZERO_(group, FIELD_X, fold_line, pole, use_device_ptr)
+        call SET_ZERO_(group, FIELD_Y, fold_line, pole, use_device_ptr)
+      else
+        call SET_ZERO_(group, FIELD_X, pole, fold_line, use_device_ptr)
+        call SET_ZERO_(group, FIELD_Y, pole, fold_line, use_device_ptr)
+      endif
+    enddo
+  endif
+
+  threshold = first
+  offset = 2*first-1
+  last_point = upper
+  if(group%gridtype == BGRID_NE) then
+    threshold = first-1+shift
+    offset = 2*threshold
+    last_point = upper+shift
+  endif
+  if(correct_lower .AND. lower < threshold) then
+    if(offset-lower > last_point) call mpp_error(FATAL, &
+         'MPP_GROUP_UPDATE: folded boundary reflection exceeds the tangential data domain')
+    if(group%gridtype == BGRID_NE) then
+      call FLIP_I_(group, FIELD_X, fold_line, lower, threshold-1, offset, use_device_ptr, transpose_axes)
+      call FLIP_I_(group, FIELD_Y, fold_line, lower, threshold-1, offset, use_device_ptr, transpose_axes)
+    else
+      call FLIP_I_(group, normal_field, fold_line, lower, threshold-1, offset, use_device_ptr, transpose_axes)
+    endif
+  endif
+
+  if(last < upper) then
+    threshold = last+1
+    if(group%gridtype == BGRID_NE) then
+      threshold = threshold+shift
+      call NEGATE_HALO_(group, FIELD_X, fold_line, threshold, last_point, use_device_ptr, transpose_axes)
+      call NEGATE_HALO_(group, FIELD_Y, fold_line, threshold, last_point, use_device_ptr, transpose_axes)
+    else
+      call NEGATE_HALO_(group, normal_field, fold_line, threshold, last_point, use_device_ptr, transpose_axes)
+    endif
+  endif
+end subroutine GROUP_FOLD_CORRECTION_
 
 subroutine SET_ZERO_  (group, field_type, i0, j0, use_device_ptr)
   type(mpp_group_update_type), intent(in), target :: group
@@ -923,12 +1014,13 @@ subroutine SET_ZERO_  (group, field_type, i0, j0, use_device_ptr)
   enddo
 end subroutine SET_ZERO_
 
-subroutine NEGATE_HALO_  (group, field_type, j0, is, ie, use_device_ptr)
+subroutine NEGATE_HALO_  (group, field_type, j0, is, ie, use_device_ptr, transpose_axes)
   type(mpp_group_update_type), intent(in), target :: group
   integer, intent(in) :: field_type !< FIELD_S, FIELD_X, or FIELD_Y
   integer, intent(in) :: j0 !< j point to negate
   integer, intent(in) :: is, ie !< range of i indices to negate
   logical, intent(in) :: use_device_ptr
+  logical, intent(in), optional :: transpose_axes
 
   integer, allocatable, dimension(:) :: lb, ub
   MPP_TYPE_, pointer :: field2d(:,:)
@@ -938,10 +1030,17 @@ subroutine NEGATE_HALO_  (group, field_type, j0, is, ie, use_device_ptr)
   integer :: nd !< Number of dimensions
   integer :: ix, iy !< Indices of the domain-decomposed dimensions
   integer :: l, i1, i2, i3, i4
-  integer :: is0, js0
+  integer :: is0, js0, swap
+  logical :: transpose
 
   ix = group%ix_v
   iy = group%iy_v
+  transpose = .false.
+  if(present(transpose_axes)) transpose = transpose_axes
+  if(transpose) then
+    ix = group%iy_v
+    iy = group%ix_v
+  endif
 
   nd = size(group%shape_x) ! Assume that dimensions of x and y fields must agree
   allocate (lb(nd), ub(nd))
@@ -978,6 +1077,9 @@ subroutine NEGATE_HALO_  (group, field_type, j0, is, ie, use_device_ptr)
         end select
     end select
 
+    if(transpose) then
+      swap = is0; is0 = js0; js0 = swap
+    endif
     lb(ix) = is - is0 + 1
     ub(ix) = ie - is0 + 1
 
@@ -1036,13 +1138,14 @@ subroutine NEGATE_HALO_  (group, field_type, j0, is, ie, use_device_ptr)
   enddo
 end subroutine NEGATE_HALO_
 
-subroutine FLIP_I_  (group, field_type, j0, is, ie, offset, use_device_ptr)
+subroutine FLIP_I_  (group, field_type, j0, is, ie, offset, use_device_ptr, transpose_axes)
   type(mpp_group_update_type), intent(in), target :: group
   integer, intent(in) :: field_type !< FIELD_S, FIELD_X, or FIELD_Y
   integer, intent(in) :: j0 !< j point to negate
   integer, intent(in) :: is, ie !< range of i indices to negate
   integer, intent(in) :: offset !< Offset when flipping the i axis
   logical, intent(in) :: use_device_ptr
+  logical, intent(in), optional :: transpose_axes
 
   integer, allocatable, dimension(:) :: lb, ub
   MPP_TYPE_, pointer :: field2d(:,:)
@@ -1052,12 +1155,19 @@ subroutine FLIP_I_  (group, field_type, j0, is, ie, offset, use_device_ptr)
   integer :: nd !< Number of dimensions
   integer :: ix, iy !< Indices of the domain-decomposed dimensions
   integer :: l, i1, i2, i3, i4
-  integer :: is0, js0, offset1
+  integer :: is0, js0, offset1, swap
+  logical :: transpose
 
   integer :: src(4)
 
   ix = group%ix_v
   iy = group%iy_v
+  transpose = .false.
+  if(present(transpose_axes)) transpose = transpose_axes
+  if(transpose) then
+    ix = group%iy_v
+    iy = group%ix_v
+  endif
 
   nd = size(group%shape_x) ! Assume that dimensions of x and y fields must agree
   allocate (lb(nd), ub(nd))
@@ -1094,6 +1204,9 @@ subroutine FLIP_I_  (group, field_type, j0, is, ie, offset, use_device_ptr)
         end select
     end select
 
+    if(transpose) then
+      swap = is0; is0 = js0; js0 = swap
+    endif
     lb(ix) = is - is0 + 1
     ub(ix) = ie - is0 + 1
 

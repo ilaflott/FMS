@@ -1042,31 +1042,14 @@
        domain%update_N%nsend = 0
        domain%update_N%nrecv = 0
 
-       if( BTEST(domain%fold,SOUTH) ) then
-          call compute_overlaps_fold_south(domain, CENTER,      0,      0)
-          call compute_overlaps_fold_south(domain, CORNER, ishift, jshift)
-          call compute_overlaps_fold_south(domain, EAST,   ishift,      0)
-          call compute_overlaps_fold_south(domain, NORTH,  0,      jshift)
-       else if( BTEST(domain%fold,WEST) ) then
-          call compute_overlaps_fold_west(domain, CENTER,      0,      0)
-          call compute_overlaps_fold_west(domain, CORNER, ishift, jshift)
-          call compute_overlaps_fold_west(domain, EAST,   ishift,      0)
-          call compute_overlaps_fold_west(domain, NORTH,       0, jshift)
-       else if( BTEST(domain%fold,EAST) ) then
-          call compute_overlaps_fold_east(domain, CENTER,      0,      0)
-          call compute_overlaps_fold_east(domain, CORNER, ishift, jshift)
-          call compute_overlaps_fold_east(domain, EAST,   ishift,      0)
-          call compute_overlaps_fold_east(domain, NORTH,       0, jshift)
-       else
-          call compute_overlaps(domain, CENTER, domain%update_T, check_T,             0,      0, x_offset, y_offset, &
-                                domain%whalo, domain%ehalo, domain%shalo, domain%nhalo)
-          call compute_overlaps(domain, CORNER, domain%update_C, domain%check_C, ishift, jshift, x_offset, y_offset, &
-                                domain%whalo, domain%ehalo, domain%shalo, domain%nhalo)
-          call compute_overlaps(domain, EAST,   domain%update_E, domain%check_E,  ishift,     0, x_offset, y_offset, &
-                                domain%whalo, domain%ehalo, domain%shalo, domain%nhalo)
-          call compute_overlaps(domain, NORTH,  domain%update_N, domain%check_N,      0, jshift, x_offset, y_offset, &
-                                domain%whalo, domain%ehalo, domain%shalo, domain%nhalo)
-       endif
+       call compute_overlaps(domain, CENTER, domain%update_T, check_T,             0,      0, x_offset, y_offset, &
+                             domain%whalo, domain%ehalo, domain%shalo, domain%nhalo)
+       call compute_overlaps(domain, CORNER, domain%update_C, domain%check_C, ishift, jshift, x_offset, y_offset, &
+                             domain%whalo, domain%ehalo, domain%shalo, domain%nhalo)
+       call compute_overlaps(domain, EAST,   domain%update_E, domain%check_E,  ishift,     0, x_offset, y_offset, &
+                             domain%whalo, domain%ehalo, domain%shalo, domain%nhalo)
+       call compute_overlaps(domain, NORTH,  domain%update_N, domain%check_N,      0, jshift, x_offset, y_offset, &
+                             domain%whalo, domain%ehalo, domain%shalo, domain%nhalo)
        call check_overlap_pe_order(domain, domain%update_T, trim(domain%name)//" update_T in mpp_define_domains")
        call check_overlap_pe_order(domain, domain%update_C, trim(domain%name)//" update_C in mpp_define_domains")
        call check_overlap_pe_order(domain, domain%update_E, trim(domain%name)//" update_E in mpp_define_domains")
@@ -1629,6 +1612,17 @@ end subroutine check_message_size
     !--- if there is no halo, no need to compute overlaps.
     if(whalo==0 .AND. ehalo==0 .AND. shalo==0 .AND. nhalo==0) return
 
+    if(BTEST(domain%fold,SOUTH)) then
+       call compute_overlaps_fold_south(domain, position, update, check, ishift, jshift, whalo, ehalo, shalo, nhalo)
+       return
+    else if(BTEST(domain%fold,WEST)) then
+       call compute_overlaps_fold_west(domain, position, update, check, ishift, jshift, whalo, ehalo, shalo, nhalo)
+       return
+    else if(BTEST(domain%fold,EAST)) then
+       call compute_overlaps_fold_east(domain, position, update, check, ishift, jshift, whalo, ehalo, shalo, nhalo)
+       return
+    endif
+
     !--- when there is only one tile, n will equal to np
     nlist = size(domain%list(:))
     set_check = .false.
@@ -1657,10 +1651,6 @@ end subroutine check_message_size
     middle = (isg+ieg)/2+1
     tMe = 1; tNbr = 1
     folded_north = BTEST(domain%fold,NORTH)
-    if( BTEST(domain%fold,SOUTH) .OR. BTEST(domain%fold,EAST) .OR. BTEST(domain%fold,WEST) ) then
-       call mpp_error(FATAL,"mpp_domains_define.inc(compute_overlaps): folded south, east or west boundary condition "&
-            &//"is not supported, please use other version of compute_overlaps for "//trim(domain%name))
-    endif
 
     nsend = 0
     nsend_check = 0
@@ -1771,10 +1761,13 @@ end subroutine check_message_size
              endif
           end if
 
-          call fill_overlap(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, &
-                                    isg, ieg, jsg, jeg, dir, symmetry=domain%symmetry)
-          if(je2 .GE. js2) call fill_overlap(overlap, domain, m, is, ie, js2, je2, isc, iec, jsc, jec, &
-                                    isg, ieg, jsg, jeg, dir, symmetry=domain%symmetry)
+          ! An empty halo is not a cyclic-offset split rectangle.
+          if(shalo > 0) then
+             call fill_overlap(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, &
+                               isg, ieg, jsg, jeg, dir, symmetry=domain%symmetry)
+             if(je2 .GE. js2) call fill_overlap(overlap, domain, m, is, ie, js2, je2, isc, iec, jsc, jec, &
+                               isg, ieg, jsg, jeg, dir, symmetry=domain%symmetry)
+          endif
 
           !to_pe's SW halo
           dir = 4
@@ -3011,956 +3004,294 @@ end subroutine check_message_size
   !> Computes remote domain overlaps
   !! assumes only one in each direction
   !! will calculate the overlapping for T,E,C,N-cell separately.
-  subroutine compute_overlaps_fold_south( domain, position, ishift, jshift)
+  !! Reflect the Northern normal intervals at the lower y boundary. The fold
+  !! constant is 2*jsg-1 for CENTER/EAST. NORTH/CORNER reflect about the
+  !! physical fold line jsg+jshift-1, which is in the nonsymmetric low halo.
+  subroutine compute_overlaps_fold_south(domain, position, update, check, ishift, jshift, whalo, ehalo, shalo, nhalo)
     type(domain2D), intent(inout) :: domain
+    type(overlapSpec), intent(inout), pointer :: update
+    type(overlapSpec), intent(inout), pointer :: check
     integer, intent(in)           :: position, ishift, jshift
-
+    integer, intent(in)           :: whalo, ehalo, shalo, nhalo
     integer                          :: i, m, n, nlist, tMe, tNbr, dir
     integer                          :: is, ie, js, je, isc, iec, jsc, jec, isd, ied, jsd, jed
     integer                          :: isg, ieg, jsg, jeg, ioff, joff
-    integer                          :: list, middle, ni, nj, isgd, iegd, jsgd, jegd
-    integer                          :: ism, iem, jsm, jem, whalo, ehalo, shalo, nhalo
+    integer                          :: list, middle, ni, nj
+    integer                          :: ism, iem, jsm, jem
+    integer                          :: is2, ie2, js2, je2
+    integer                          :: is3, ie3, js3, je3
+    integer                          :: isd3, ied3, jsd3, jed3
+    integer                          :: isd2, ied2, jsd2, jed2
+    integer                          :: jfold
     logical                          :: folded
     type(overlap_type)               :: overlap
-    type(overlapSpec),   pointer     :: update=>NULL()
     type(overlap_type),  pointer     :: overlapList(:)=>NULL()
     type(overlap_type),  pointer     :: checkList(:)=>NULL()
-    type(overlapSpec),   pointer     :: check =>NULL()
     integer                          :: nsend, nrecv
     integer                          :: nsend_check, nrecv_check
     integer                          :: iunit
-
-    !--- since we restrict that if multiple tiles on one pe, all the tiles are limited to this pe.
-    !--- In this case, if ntiles on this pe is greater than 1, no overlapping between processor within each tile
-    !--- In this case the overlapping exist only for tMe=1 and tNbr=1
+    logical                          :: set_check
     if(size(domain%x(:)) > 1) return
-
-    !--- if there is no halo, no need to compute overlaps.
-    if(domain%whalo==0 .AND. domain%ehalo==0 .AND. domain%shalo==0 .AND. domain%nhalo==0) return
-
-    !--- when there is only one tile, n will equal to np
+    if(whalo==0 .AND. ehalo==0 .AND. shalo==0 .AND. nhalo==0) return
+    if(.NOT. domain%x(1)%cyclic) call mpp_error(FATAL, &
+         'compute_overlaps_fold_south: the tangential axis must be cyclic for '//trim(domain%name))
     nlist = size(domain%list(:))
-
-    select case(position)
-    case (CENTER)
-       update => domain%update_T
-       check  => NULL()
-    case (CORNER)
-       update => domain%update_C
-       check  => domain%check_C
-    case (EAST)
-       update => domain%update_E
-       check  => domain%check_E
-    case (NORTH)
-       update => domain%update_N
-       check  => domain%check_N
-    case default
-       call mpp_error(FATAL, &
-        "mpp_domains_define.inc(compute_overlaps_fold_south): the value of position should be CENTER, EAST, &
-                               &  CORNER or NORTH")
-    end select
-
+    set_check = .false.
+    if(ASSOCIATED(check)) set_check = .true.
     allocate(overlapList(MAXLIST) )
-    allocate(checkList(MAXLIST)   )
-
-    !--- overlap is used to store the overlapping temporarily.
+    if(set_check) allocate(checkList(MAXLIST)   )
     call allocate_update_overlap( overlap, MAXOVERLAP)
-
-    !send
-    call mpp_get_compute_domain( domain, isc, iec, jsc, jec, position=position  )
-    call mpp_get_global_domain ( domain, isg, ieg, jsg, jeg, xsize=ni, ysize=nj, position=position  ) !cyclic offsets
+    call mpp_get_compute_domain( domain, isc, iec, jsc, jec, position=position )
+    call mpp_get_global_domain ( domain, isg, ieg, jsg, jeg, xsize=ni, ysize=nj, position=position )
     call mpp_get_memory_domain ( domain, ism, iem, jsm, jem, position=position )
+    jfold = jsg
+    if(position == NORTH .OR. position == CORNER) &
+         jfold = jsg+jshift-1
+    ! The nonsymmetric lower face is caller-owned halo data, not a compute point.
+    if(jsc == jsg) jsc = max(jfold, jsm)
     update%xbegin = ism; update%xend = iem
     update%ybegin = jsm; update%yend = jem
-    if(ASSOCIATED(check)) then
+    if(set_check) then
        check%xbegin  = ism; check%xend  = iem
        check%ybegin  = jsm; check%yend  = jem
     endif
-    update%whalo  = domain%whalo; update%ehalo = domain%ehalo
-    update%shalo  = domain%shalo; update%nhalo = domain%nhalo
-    whalo         = domain%whalo; ehalo        = domain%ehalo
-    shalo         = domain%shalo; nhalo        = domain%nhalo
-
-
+    update%whalo  = whalo; update%ehalo = ehalo
+    update%shalo  = shalo; update%nhalo = nhalo
     ioff = ni - ishift
     joff = nj - jshift
-    middle = (isg+ieg)/2+1
+    middle = isg+(ieg-isg)/2+1
     tMe = 1; tNbr = 1
-
-    if(.NOT. BTEST(domain%fold,SOUTH)) then
-       call mpp_error(FATAL, "mpp_domains_define.inc(compute_overlaps_fold_south): "//&
-            "boundary condition in y-direction should be folded-south for "//trim(domain%name))
+    update%nsend = 0; update%nrecv = 0
+    if(set_check) then
+       check%nsend = 0; check%nrecv = 0
     endif
-    if(.NOT. domain%x(tMe)%cyclic) then
-       call mpp_error(FATAL, "mpp_domains_define.inc(compute_overlaps_fold_south): "//&
-            "boundary condition in x-direction should be cyclic for "//trim(domain%name))
-    endif
-
-    if(.not. domain%symmetry) then
-       call mpp_error(FATAL, "mpp_domains_define.inc(compute_overlaps_fold_south): "//&
-            "when south boundary is folded, the domain must be symmetry for "//trim(domain%name))
-    endif
-
     nsend = 0
     nsend_check = 0
     do list = 0,nlist-1
        m = mod( domain%pos+list, nlist )
-       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then  ! only compute the overlapping within tile.
-          !to_pe's eastern halo
+       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then
+
+          ! To the peer's eastern halo.
           dir = 1
           is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
-          js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
-          !--- to make sure the consistence between pes
-          if( (position == NORTH .OR. position == CORNER ) .AND. ( jsc == je .or. jec == js ) ) then
-             !--- do nothing, this point will come from other pe
+          je = jshift+domain%list(m)%y(tNbr)%compute%end; js = domain%list(m)%y(tNbr)%compute%begin
+          if( domain%symmetry .AND. (position == NORTH .OR. position == CORNER ) &
+               .AND. ( jec == js .or. jsc == je ) ) then
           else
-             if( ie.GT.ieg .AND. iec.LT.is )then ! cyclic is assumed
-                is = is-ioff; ie = ie-ioff
-             end if
-             !--- when the south face is folded, the east halo point at right side domain will be folded.
-             !--- the position should be on CORNER or NORTH
-             if( js == jsg .AND. (position == CORNER .OR. position == NORTH) &
-                  .AND. is .GE. middle .AND. domain%list(m)%x(tNbr)%compute%end+ehalo+jshift .LE. ieg ) then
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js+1, je, isc, iec, jsc, jec, dir)
-                is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
-                je = js
-                select case (position)
-                case(NORTH)
-                   i=is; is = isg+ieg-ie; ie = isg+ieg-i
-                case(CORNER)
-                   i=is; is = isg+ieg-ie-1+ishift; ie = isg+ieg-i-1+ishift
-                end select
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
+             if( js == jfold .AND. (position == CORNER .OR. position == NORTH) ) then
+                call fill_overlap_send_fold_south(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, &
+                     dir, ishift, position, ioff, middle)
              else
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, symmetry=domain%symmetry)
-             end if
+                call fill_overlap_send_nofold(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, dir, &
+                     ioff, domain%x(tMe)%cyclic, symmetry=domain%symmetry)
+             endif
           end if
 
-          !to_pe's SE halo
-          dir = 2
-          folded = .false.
+          ! To the peer's northeastern halo.
+          dir = 8
           is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
-          js = domain%list(m)%y(tNbr)%compute%begin-shalo;    je = domain%list(m)%y(tNbr)%compute%begin-1
-          if( ie.GT.ieg .AND. iec.LT.is )then ! cyclic is assumed
-             is = is-ioff; ie = ie-ioff
+          je = jshift+domain%list(m)%y(tNbr)%compute%end+nhalo;  js = jshift+domain%list(m)%y(tNbr)%compute%end+1
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          call fill_overlap_send_nofold(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, dir, ioff, &
+               domain%x(tMe)%cyclic)
+          if(js2 .LE. je2) call fill_overlap_send_nofold(overlap, domain, m, is, ie, js2, je2, isc, iec, jsc, jec, &
+               isg, ieg, dir, ioff, domain%x(tMe)%cyclic)
+
+          ! To the peer's northern halo.
+          dir = 7
+          is = domain%list(m)%x(tNbr)%compute%begin; ie = domain%list(m)%x(tNbr)%compute%end+ishift
+          je = jshift+domain%list(m)%y(tNbr)%compute%end+nhalo; js = jshift+domain%list(m)%y(tNbr)%compute%end+1
+          js2 = 0; je2 = -1
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isc, iec, jsc, jec, dir, &
+               symmetry=domain%symmetry)
+          if(js2 .LE. je2) call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js2, je2, isc, iec, jsc, &
+               jec, dir, symmetry=domain%symmetry)
+
+          ! To the peer's northwestern halo.
+          dir = 6
+          is = domain%list(m)%x(tNbr)%compute%begin-whalo; ie = domain%list(m)%x(tNbr)%compute%begin-1
+          je = jshift+domain%list(m)%y(tNbr)%compute%end+nhalo; js = jshift+domain%list(m)%y(tNbr)%compute%end+1
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          call fill_overlap_send_nofold(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, dir, ioff, &
+               domain%x(tMe)%cyclic)
+          if(js2 .LE. je2) call fill_overlap_send_nofold(overlap, domain, m, is, ie, js2, je2, isc, iec, jsc, jec, &
+               isg, ieg, dir, ioff, domain%x(tMe)%cyclic)
+
+          ! To the peer's western halo.
+          dir = 5
+          is = domain%list(m)%x(tNbr)%compute%begin-whalo;    ie = domain%list(m)%x(tNbr)%compute%begin-1
+          je = jshift+domain%list(m)%y(tNbr)%compute%end; js = domain%list(m)%y(tNbr)%compute%begin
+          if( js == jfold .AND. (position == CORNER .OR. position == NORTH)) then
+             call fill_overlap_send_fold_south(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, dir, &
+                  ishift, position, ioff, middle)
+          else
+             call fill_overlap_send_nofold(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, dir, &
+                  ioff, domain%x(tMe)%cyclic, symmetry=domain%symmetry)
           end if
-          if( js.LT.jsg )then
+
+          ! To the peer's southwestern halo.
+          dir = 4
+          is = domain%list(m)%x(tNbr)%compute%begin-whalo;  ie = domain%list(m)%x(tNbr)%compute%begin-1
+          je = domain%list(m)%y(tNbr)%compute%begin-1; js = domain%list(m)%y(tNbr)%compute%begin-shalo
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          is3 = 0; ie3 = -1; js3 = 0; je3 = -1
+          folded = .FALSE.
+          if(je .LT. jfold) then
              folded = .TRUE.
-             call get_fold_index_south(isg, ieg, jsg, ishift, position, is, ie, js, je)
-          end if
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+          else if(js .LT. jfold) then
+             folded = .TRUE.
+             is2 = is; ie2 = ie; je2 = je; js2 = jfold
+             je = jfold-1
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+             if( is .GT. ieg) then
+                is = is - ioff; ie = ie - ioff
+             else if( ie .GT. ieg ) then
+                is3 = is; ie3 = ieg; je3 = je; js3 = js
+                is = ieg+1-ioff; ie = ie - ioff
+             endif
+          endif
+          ! Match the receive-side order: unwrapped piece before cyclic piece.
+          if(ie3 .GE. is3) call fill_overlap_send_nofold(overlap, domain, m, is3, ie3, js3, je3, isc, iec, jsc, jec, &
+               isg, ieg, dir, ioff, domain%x(tMe)%cyclic, folded)
+          if( js == jfold .AND. jsc == jfold .AND. (position == CORNER .OR. position == NORTH)) then
+             call fill_overlap_send_fold_south(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, dir, &
+                  ishift, position, ioff, middle)
+          else
+             call fill_overlap_send_nofold(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, dir, &
+                  ioff, domain%x(tMe)%cyclic, folded)
+          endif
+          if(ie2 .GE. is2) then
+             if(js2 == jfold .AND. jsc == jfold.AND.(position == CORNER .OR. position == NORTH))then
+                call fill_overlap_send_fold_south(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, isg, &
+                     ieg, dir, ishift, position, ioff, middle)
+             else
+                call fill_overlap_send_nofold(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, isg, ieg, &
+                     dir, ioff, domain%x(tMe)%cyclic)
+             endif
+          endif
 
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir, folded)
-
-          !to_pe's southern halo
+          ! To the peer's southern halo.
           dir = 3
           folded = .FALSE.
           is = domain%list(m)%x(tNbr)%compute%begin; ie = domain%list(m)%x(tNbr)%compute%end+ishift
-          js = domain%list(m)%y(tNbr)%compute%begin-shalo; je = domain%list(m)%y(tNbr)%compute%begin-1
-          folded = .FALSE.
-          if( js.LT.jsg )then
+          je = domain%list(m)%y(tNbr)%compute%begin-1; js = domain%list(m)%y(tNbr)%compute%begin-shalo
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          if( je .LT. jfold) then
              folded = .TRUE.
-             call get_fold_index_south(isg, ieg, jsg, ishift, position, is, ie, js, je)
-          end if
-          !--- when domain symmetry and position is EAST or CORNER, the point when isc == ie,
-          !--- no need to send, because the data on that point will come from other pe.
-          !--- come from two pe ( there will be only one point on one pe. ).
-          if( (position == EAST .OR. position == CORNER ) .AND. ( isc == ie .or. iec == is ) ) then
-             !--- do nothing, this point will come from other pe
-          else
-             call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                         is, ie, js, je, isc, iec, jsc, jec, dir, folded, symmetry=domain%symmetry)
-          endif
-          !--- when south edge is folded, ie will be less than isg when position is EAST and CORNER
-          if(is .LT. isg) then
-             is = is + ioff
-             call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                         is, is, js, je, isc, iec, jsc, jec, dir, folded)
-          endif
-
-          !to_pe's SW halo
-          dir = 4
-          folded = .false.
-          is = domain%list(m)%x(tNbr)%compute%begin-whalo; ie = domain%list(m)%x(tNbr)%compute%begin-1
-          js = domain%list(m)%y(tNbr)%compute%begin-shalo; je = domain%list(m)%y(tNbr)%compute%begin-1
-          if( isg.GT.is .AND. ie.LT.isc )then !cyclic offset
-             is = is+ioff; ie = ie+ioff
-          end if
-          if( js.LT.jsg )then
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+          else if( js .LT. jfold )then
              folded = .TRUE.
-             call get_fold_index_south(isg, ieg, jsg, ishift, position, is, ie, js, je)
+             is2 = is; ie2 = ie; je2 = je; js2 = jfold
+             je = jfold-1;
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
           end if
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir, folded)
-          !--- when south edge is folded, is will be less than isg when position is EAST and CORNER
-          if(is .LT. isg) then
-             is = is + ioff
-             call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                         is, is, js, je, isc, iec, jsc, jec, dir, folded)
-          endif
-
-          !to_pe's western halo
-          dir = 5
-          is = domain%list(m)%x(tNbr)%compute%begin-whalo;    ie = domain%list(m)%x(tNbr)%compute%begin-1
-          js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
-
-          !--- to make sure the consistence between pes
-          if( (position == NORTH .OR. position == CORNER ) .AND. ( jsc == je .or. jec == js ) ) then
-             !--- do nothing, this point will come from other pe
+          if( js == jfold .AND. jsc == jfold .AND.(position == CORNER .OR. position == NORTH))then
+             call fill_overlap_send_fold_south(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, dir, &
+                  ishift, position, ioff, middle, domain%symmetry)
           else
-             if( isg.GT.is .AND. ie.LT.isc )then ! cyclic offset
-                is = is+ioff; ie = ie+ioff
-             end if
-             !--- when the south face is folded, some point at j=nj will be folded.
-             !--- the position should be on CORNER or NORTH
-             if( js == jsg .AND. (position == CORNER .OR. position == NORTH) &
-                  .AND. ( domain%list(m)%x(tNbr)%compute%begin == isg .OR. &
-                        & domain%list(m)%x(tNbr)%compute%begin-1 .GE. middle)) then
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js+1, je, isc, iec, jsc, jec, dir)
-                is = domain%list(m)%x(tNbr)%compute%begin-whalo;    ie = domain%list(m)%x(tNbr)%compute%begin-1
-                js = domain%list(m)%y(tNbr)%compute%begin;   je = js
-                if ( domain%list(m)%x(tNbr)%compute%begin == isg ) then
-                   select case (position)
-                   case(NORTH)
-                      i=is; is = 2*isg-ie-1; ie = 2*isg-i-1
-                   case(CORNER)
-                      i=is; is = 2*isg-ie-2+2*ishift; ie = 2*isg-i-2+2*ishift
-                   end select
-                   if(ie .GT. domain%x(tMe)%compute%end+ishift) call mpp_error( FATAL, &
-                        'mpp_domains_define.inc(compute_overlaps_fold_south): west edge ubound error send.' )
-                else
-                   select case (position)
-                   case(NORTH)
-                      i=is; is = isg+ieg-ie; ie = isg+ieg-i
-                   case(CORNER)
-                      i=is; is = isg+ieg-ie-1+ishift; ie = isg+ieg-i-1+ishift
-                   end select
-                end if
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
+             call fill_overlap_send_nofold(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, dir, &
+                  ioff, domain%x(tMe)%cyclic, folded, domain%symmetry)
+          endif
+          if(ie2 .GE. is2) then
+             if(js2 == jfold .AND. jsc == jfold .AND.(position == CORNER .OR. position == NORTH))then
+                call fill_overlap_send_fold_south(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, isg, &
+                     ieg, dir, ishift, position, ioff, middle, domain%symmetry)
              else
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, symmetry=domain%symmetry)
-             end if
+                call fill_overlap_send_nofold(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, isg, ieg, &
+                     dir, ioff, domain%x(tMe)%cyclic, symmetry=domain%symmetry)
+             endif
           endif
 
-          !to_pe's NW halo
-          dir = 6
-          is = domain%list(m)%x(tNbr)%compute%begin-whalo;    ie = domain%list(m)%x(tNbr)%compute%begin-1
-          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
-          if( isg.GT.is .AND. ie.LT.isc )then ! cyclic offset
-             is = is+ioff; ie = ie+ioff
-          end if
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir)
-
-          !to_pe's northern halo
-          dir = 7
-          is = domain%list(m)%x(tNbr)%compute%begin; ie = domain%list(m)%x(tNbr)%compute%end+ishift
-          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir, symmetry=domain%symmetry)
-
-          !to_pe's NE halo
-          dir = 8
-          is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
-          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
-          if( ie.GT.ieg .AND. iec.LT.is )then !cyclic offset
-             is = is-ioff; ie = ie-ioff
-          end if
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir)
-
-          !--- Now calculate the overlapping for fold-edge.
-          !--- only position at NORTH and CORNER need to be considered
-          if( ( position == NORTH .OR. position == CORNER) ) then
-             !fold is within domain
-             if( domain%y(tMe)%domain_data%begin .LE. jsg .AND. jsg .LE. domain%y(tMe)%domain_data%end+jshift )then
-                dir = 3
-                !--- calculate the overlapping for sending
-                if( domain%x(tMe)%pos .LT. (size(domain%x(tMe)%list(:))+1)/2 )then
-                   js = domain%list(m)%y(tNbr)%compute%begin;   je = js
-                   if( js == jsg )then   ! fold is within domain.
-                      is = domain%list(m)%x(tNbr)%compute%begin; ie = domain%list(m)%x(tNbr)%compute%end+ishift
-                      select case (position)
-                      case(NORTH)
-                         is = max(is, middle)
-                         i=is; is = isg+ieg-ie; ie = isg+ieg-i
-                      case(CORNER)
-                         is = max(is, middle)
-                         i=is; is = isg+ieg-ie-1+ishift; ie = isg+ieg-i-1+ishift
-                      end select
-                      call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                                 is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
-                      is = max(is, isc); ie = min(ie, iec)
-                      js = max(js, jsc); je = min(je, jec)
-                      if(debug_update_level .NE. NO_CHECK .AND. ie.GE.is .AND. je.GE.js )then
-                         nsend_check = nsend_check+1
-                         call allocate_check_overlap(checkList(nsend_check), 1)
-                         call insert_check_overlap(checkList(nsend_check), domain%list(m)%pe, &
-                                                   tMe, 2, ONE_HUNDRED_EIGHTY, is, ie, js, je)
-                      end if
+          ! The lower tangential half owns the redundant fold-line points.
+          if( (position == NORTH .OR. position == CORNER)  .AND. &
+               domain%x(tMe)%pos .LT. (size(domain%x(tMe)%list(:))+1)/2 ) then
+             if( domain%list(m)%y(tNbr)%compute%begin-shalo .LE. jfold .AND. isc .LE. middle)then
+                je = jfold; js = jfold
+                is = domain%list(m)%x(tNbr)%compute%begin; ie = domain%list(m)%x(tNbr)%compute%end+ishift
+                is = max(is, middle)
+                select case (position)
+                case(NORTH)
+                   i = is; is = isg+ieg-ie; ie = isg+ieg-i
+                case(CORNER)
+                   i = is; is = isg+ieg-ie-1+ishift; ie = isg+ieg-i-1+ishift
+                end select
+                call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
+             endif
+             if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+                js = domain%list(m)%y(tNbr)%compute%begin;
+                if(js == jsg .AND. &
+                     domain%y(tMe)%list(domain%list(m)%y(tNbr)%pos)%memory%begin <= jfold) &
+                     js = jfold
+                if(js == jfold) then
+                   is = max(is, isc); ie = min(ie, iec)
+                   je = min(je, jec); js = max(js, jsc)
+                   if(ie.GE.is .AND. js .LE. je )then
+                      nsend_check = nsend_check+1
+                      if(nsend_check > size(checkList(:)) ) then
+                         call expand_check_overlap_list(checkList, nlist)
+                      endif
+                      call allocate_check_overlap(checkList(nsend_check), 1)
+                      call insert_check_overlap(checkList(nsend_check), domain%list(m)%pe, tMe, 4, &
+                           ONE_HUNDRED_EIGHTY, is, ie, js, je)
                    end if
                 end if
-             end if
-          end if
-       end if
-       !--- copy the overlapping information
-       if( overlap%count > 0) then
-         nsend = nsend + 1
-         if(nsend > size(overlapList(:)) ) then
-            call mpp_error(NOTE, 'mpp_domains_define.inc(compute_overlaps_south): overlapList for send is expanded')
-            call expand_update_overlap_list(overlapList, nlist)
-         endif
-         call add_update_overlap(overlapList(nsend), overlap)
-         call init_overlap_type(overlap)
-       endif
-    end do  ! end of send set up.
+             endif
+          endif
 
-    if(debug_message_passing) then
-       !--- write out send information
-       iunit = mpp_pe() + 1000
-       do m =1,nsend
-          write(iunit, *) "********to_pe = " ,overlapList(m)%pe, " count = ",overlapList(m)%count
-          do n = 1, overlapList(m)%count
-             write(iunit, *) overlapList(m)%is(n), overlapList(m)%ie(n), overlapList(m)%js(n), overlapList(m)%je(n), &
-                  overlapList(m)%dir(n), overlapList(m)%rotation(n)
-          enddo
-       enddo
-       if( nsend > 0) flush(iunit)
-    endif
-
-    ! copy the overlapping information into domain data structure
-    if(nsend>0) then
-      if (associated(update%send)) deallocate(update%send) !< Check if associated
-       allocate(update%send(nsend))
-       update%nsend = nsend
-       do m = 1, nsend
-          call add_update_overlap( update%send(m), overlapList(m) )
-       enddo
-    endif
-
-    if(nsend_check>0) then
-      if (associated(check%send)) deallocate(check%send) !< Check if associated
-       allocate(check%send(nsend_check))
-       check%nsend = nsend_check
-       do m = 1, nsend_check
-          call add_check_overlap( check%send(m), checkList(m) )
-       enddo
-    endif
-
-    do m = 1,size(overlapList(:))
-       call deallocate_overlap_type(overlapList(m))
-    enddo
-
-    if(debug_update_level .NE. NO_CHECK) then
-       do m = 1,size(checkList(:))
-          call deallocate_overlap_type(checkList(m))
-       enddo
-    endif
-
-    isgd = isg - domain%whalo
-    iegd = ieg + domain%ehalo
-    jsgd = jsg - domain%shalo
-    jegd = jeg + domain%nhalo
-
-    ! begin setting up recv
-    nrecv = 0
-    nrecv_check = 0
-    do list = 0,nlist-1
-       m = mod( domain%pos+nlist-list, nlist )
-       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then  ! only compute the overlapping within tile.
-          isc = domain%list(m)%x(1)%compute%begin; iec = domain%list(m)%x(1)%compute%end+ishift
-          jsc = domain%list(m)%y(1)%compute%begin; jec = domain%list(m)%y(1)%compute%end+jshift
-          !recv_e
-          dir = 1
-          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%domain_data%end+ishift
-          jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if( (position == NORTH .OR. position == CORNER ) .AND. ( jsd == je .or. jed == js ) ) then
-             ! --- do nothing, this point will come from other pe
-          else
-             if( ied.GT.ieg .AND. ie.LT.isd )then !cyclic offset
-                is = is+ioff; ie = ie+ioff
-             end if
-
-             !--- when the south face is folded, the east halo point at right side domain will be folded.
-             !--- the position should be on CORNER or NORTH
-             if( jsd == jsg .AND. (position == CORNER .OR. position == NORTH) &
-                  .AND. isd .GE. middle .AND. ied .LE. ieg ) then
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd, ied, jsd+1, jed, dir)
-                is=isc; ie=iec; js=jsc; je=jec
-                jed = jsd
-                select case (position)
-                case(NORTH)
-                   i=is; is = isg+ieg-ie; ie = isg+ieg-i
-                case(CORNER)
-                   i=is; is = isg+ieg-ie-1+ishift; ie = isg+ieg-i-1+ishift
-                end select
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd, ied, jsd, jed, dir, .TRUE.)
-             else
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd, ied, jsd, jed, dir, symmetry=domain%symmetry)
-             end if
-          end if
-
-          !recv_se
+          ! To the peer's southeastern halo.
           dir = 2
-          folded = .false.
-          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%domain_data%end+ishift
-          jsd = domain%y(tMe)%domain_data%begin;    jed = domain%y(tMe)%compute%begin-1
-          is=isc; ie=iec; js=jsc; je=jec
-          if( jsd.LT.jsg )then
-             folded = .true.
-             call get_fold_index_south(isg, ieg, jsg, ishift, position, is, ie, js, je)
-          end if
-          if( ied.GT.ieg .AND. ie.LT.isd )then !cyclic offset
-             is = is+ioff; ie = ie+ioff
+          is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
+          je = domain%list(m)%y(tNbr)%compute%begin-1; js = domain%list(m)%y(tNbr)%compute%begin-shalo
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          is3 = 0; ie3 = -1; js3 = 0; je3 = -1
+          folded = .FALSE.
+          if(je .LT. jfold) then
+             folded = .TRUE.
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+          else if(js .LT. jfold) then
+             folded = .TRUE.
+             is2 = is; ie2 = ie; je2 = je; js2 = jfold
+             je = jfold-1
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+             if( ie .LT. isg )then
+                is = is+ioff; ie = ie+ioff
+             else if( is .LT. isg) then
+                is3 = isg; ie3 = ie; je3 = je; js3 = js
+                is = is+ioff; ie = isg-1+ioff;
+             endif
           endif
-          call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                     is, ie, js, je, isd, ied, jsd, jed, dir, folded)
-
-          !recv_s
-          dir = 3
-          folded = .false.
-          isd = domain%x(tMe)%compute%begin; ied = domain%x(tMe)%compute%end+ishift
-          jsd = domain%y(tMe)%domain_data%begin;    jed = domain%y(tMe)%compute%begin-1
-          is=isc; ie=iec; js=jsc; je=jec
-          if( jsd.LT.jsg )then
-             folded = .true.
-             call get_fold_index_south(isg, ieg, jsg, ishift, position, is, ie, js, je)
-          end if
-          if( (position == EAST .OR. position == CORNER ) .AND. (isd == ie .or. ied == is ) ) then
-             !--- do nothing, this point will come from other pe
+          if(ie3 .GE. is3) call fill_overlap_send_nofold(overlap, domain, m, is3, ie3, js3, je3, isc, iec, jsc, jec, &
+               isg, ieg, dir, ioff, domain%x(tMe)%cyclic, folded)
+          if( js == jfold .AND. jsc == jfold .AND. (position == CORNER .OR. position == NORTH)) then
+             call fill_overlap_send_fold_south(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, dir, &
+                  ishift, position, ioff, middle)
           else
-             call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                        is, ie, js, je, isd, ied, jsd, jed, dir, folded, symmetry=domain%symmetry)
-          end if
-          !--- when south edge is folded, is will be less than isg when position is EAST and CORNER
-          if(is .LT. isg ) then
-             is = is + ioff
-             call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                        is, is, js, je, isd, ied, jsd, jed, dir, folded)
+             call fill_overlap_send_nofold(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, isg, ieg, dir, &
+                  ioff, domain%x(tMe)%cyclic, folded)
           endif
-
-          !recv_sw
-          dir = 4
-          folded = .false.
-          isd = domain%x(tMe)%domain_data%begin; ied = domain%x(tMe)%compute%begin-1
-          jsd = domain%y(tMe)%domain_data%begin; jed = domain%y(tMe)%compute%begin-1
-          is=isc; ie=iec; js=jsc; je=jec
-          if( jsd.LT.jsg )then
-             folded = .true.
-             call get_fold_index_south(isg, ieg, jsg, ishift, position, is, ie, js, je)
-          end if
-          if( isd.LT.isg .AND. is.GT.ied ) then ! cyclic offset
-             is = is-ioff; ie = ie-ioff
-          end if
-          call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                     is, ie, js, je, isd, ied, jsd, jed, dir, folded)
-          !--- when southth edge is folded, is will be less than isg when position is EAST and CORNER
-          if(is .LT. isg ) then
-             is = is + ioff
-             call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                        is, is, js, je, isd, ied, jsd, jed, dir, folded )
-          endif
-
-          !recv_w
-          dir = 5
-          isd = domain%x(tMe)%domain_data%begin;    ied = domain%x(tMe)%compute%begin-1
-          jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if( (position == NORTH .OR. position == CORNER ) .AND. ( jsd == je .or. jed == js ) ) then
-             ! --- do nothing, this point will come from other pe
-          else
-             if( isd.LT.isg .AND. is.GT.ied )then ! cyclic offset
-                is = is-ioff; ie = ie-ioff
-             end if
-             !--- when the south face is folded, some point at j=nj will be folded.
-             !--- the position should be on CORNER or NORTH
-             if( jsd == jsg .AND. (position == CORNER .OR. position == NORTH) &
-                  .AND. ( isd < isg  .OR. ied .GE. middle ) )  then
-                call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                           is, ie, js, je, isd, ied, jsd+1, jed, dir)
-                is=isc; ie=iec; js=jsc; je=jec
-                if(isd < isg) then
-                   select case (position)
-                   case(NORTH)
-                      i=is; is = 2*isg-ie-1; ie = 2*isg-i-1
-                   case(CORNER)
-                      ied = ied -1 + ishift
-                      i=is; is = 2*isg-ie-2+2*ishift; ie = 2*isg-i-2+2*ishift
-                   end select
-                   if(ie .GT. domain%x(tMe)%compute%end+ishift) call mpp_error( FATAL, &
-                        'mpp_domains_define.inc(compute_overlaps): west edge ubound error recv.' )
-                else
-                   select case (position)
-                   case(NORTH)
-                      i=is; is = isg+ieg-ie; ie = isg+ieg-i
-                   case(CORNER)
-                      i=is; is = isg+ieg-ie-1+ishift; ie = isg+ieg-i-1+ishift
-                   end select
-                end if
-                call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                           is, ie, js, je, isd, ied, jsd, jsd, dir, .TRUE.)
+          if(ie2 .GE. is2) then
+             if(js2 == jfold .AND. jsc == jfold .AND.(position == CORNER .OR. position == NORTH))then
+                call fill_overlap_send_fold_south(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, isg, &
+                     ieg, dir, ishift, position, ioff, middle)
              else
-                call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                           is, ie, js, je, isd, ied, jsd, jed, dir, symmetry=domain%symmetry)
-             end if
-          endif
-
-          !recv_nw
-          dir = 6
-          isd = domain%x(tMe)%domain_data%begin;    ied = domain%x(tMe)%compute%begin-1
-          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%domain_data%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if( isd.LT.isg .AND. is.GE.ied )then !cyclic offset
-             is = is-ioff; ie = ie-ioff
-          endif
-
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isd, ied, jsd, jed, dir)
-
-          !recv_n
-          dir = 7
-          isd = domain%x(tMe)%compute%begin; ied = domain%x(tMe)%compute%end+ishift
-          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%domain_data%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isd, ied, jsd, jed, dir, symmetry=domain%symmetry)
-
-          !recv_ne
-          dir = 8
-          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%domain_data%end+ishift
-          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%domain_data%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if(  ied.GT.ieg .AND. ie.LT.isd )then ! cyclic offset
-             is = is+ioff; ie = ie+ioff
-          end if
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isd, ied, jsd, jed, dir)
-
-          !--- Now calculate the overlapping for fold-edge.
-          !--- for folded-south-edge, only need to consider to_pe's south(3) direction
-          !--- only position at NORTH and CORNER need to be considered
-          if( ( position == NORTH .OR. position == CORNER) ) then
-            !fold is within domain
-             if( domain%y(tMe)%domain_data%begin .LE. jsg .AND. jsg .LE. domain%y(tMe)%domain_data%end+jshift )then
-                dir = 3
-                !--- calculating overlapping for receving on north
-                if( domain%x(tMe)%pos .GE. size(domain%x(tMe)%list(:))/2 )then
-                   jsd = domain%y(tMe)%compute%begin;   jed = jsd
-                   if( jsd == jsg )then   ! fold is within domain.
-                      isd = domain%x(tMe)%compute%begin; ied = domain%x(tMe)%compute%end+ishift
-                      is=isc; ie=iec; js = jsc; je = jec
-                      select case (position)
-                      case(NORTH)
-                         isd = max(isd, middle)
-                         i=is; is = isg+ieg-ie; ie = isg+ieg-i
-                      case(CORNER)
-                         isd = max(isd, middle)
-                         i=is; is = isg+ieg-ie-1+ishift; ie = isg+ieg-i-1+ishift
-                      end select
-                      call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                                 is, ie, js, je, isd, ied, jsd, jed, dir, .TRUE.)
-                      is = max(is, isd); ie = min(ie, ied)
-                      js = max(js, jsd); je = min(je, jed)
-                      if(debug_update_level .NE. NO_CHECK .AND. ie.GE.is .AND. je.GE.js )then
-                         nrecv_check = nrecv_check+1
-                         call allocate_check_overlap(checkList(nrecv_check), 1)
-                         call insert_check_overlap(checkList(nrecv_check), domain%list(m)%pe, &
-                                                   tMe, 2, ONE_HUNDRED_EIGHTY, is, ie, js, je)
-                      endif
-                   endif
-                endif
+                call fill_overlap_send_nofold(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, isg, ieg, &
+                     dir, ioff, domain%x(tMe)%cyclic)
              endif
           endif
        endif
-       !--- copy the overlapping information
        if( overlap%count > 0) then
-          nrecv = nrecv + 1
-          if(nrecv > size(overlapList(:)) )then
-            call mpp_error(NOTE, 'mpp_domains_define.inc(compute_overlaps_south): overlapList for recv is expanded')
-            call expand_update_overlap_list(overlapList, nlist)
+          nsend = nsend + 1
+          if(nsend > size(overlapList(:)) ) then
+             call mpp_error(NOTE, &
+                  'mpp_domains_define.inc(compute_overlaps_fold_south): overlapList for send is expanded')
+             call expand_update_overlap_list(overlapList, nlist)
           endif
-          call add_update_overlap( overlapList(nrecv), overlap)
+          call add_update_overlap(overlapList(nsend), overlap)
           call init_overlap_type(overlap)
        endif
-    enddo ! end of recv do loop
-
+    end do
     if(debug_message_passing) then
-       !--- write out send information
-       iunit = mpp_pe() + 1000
-       do m =1,nrecv
-          write(iunit, *) "********from_pe = " ,overlapList(m)%pe, " count = ",overlapList(m)%count
-          do n = 1, overlapList(m)%count
-             write(iunit, *) overlapList(m)%is(n), overlapList(m)%ie(n), overlapList(m)%js(n), overlapList(m)%je(n), &
-                  overlapList(m)%dir(n), overlapList(m)%rotation(n)
-          enddo
-       enddo
-       if(nrecv >0) flush(iunit)
-    endif
-
-    ! copy the overlapping information into domain
-    if(nrecv>0) then
-       update%nrecv = nrecv
-       if (associated(update%recv)) deallocate(update%recv) !< Check if associated
-       allocate(update%recv(nrecv))
-       do m = 1, nrecv
-          call add_update_overlap( update%recv(m), overlapList(m) )
-          do n = 1, update%recv(m)%count
-             if(update%recv(m)%tileNbr(n) == domain%tile_id(tMe)) then
-                if(update%recv(m)%dir(n) == 1) domain%x(tMe)%loffset = 0
-                if(update%recv(m)%dir(n) == 7) domain%y(tMe)%loffset = 0
-             endif
-          enddo
-       enddo
-    endif
-
-    if(nrecv_check>0) then
-       check%nrecv = nrecv_check
-       if (associated(check%recv)) deallocate(check%recv) !< Check if associated
-       allocate(check%recv(nrecv_check))
-       do m = 1, nrecv_check
-          call add_check_overlap( check%recv(m), checkList(m) )
-       enddo
-    endif
-
-    call deallocate_overlap_type(overlap)
-
-    do m = 1,size(overlapList(:))
-       call deallocate_overlap_type(overlapList(m))
-    enddo
-
-    if(debug_update_level .NE. NO_CHECK) then
-       do m = 1,size(checkList(:))
-          call deallocate_overlap_type(checkList(m))
-       enddo
-    endif
-
-    deallocate(overlapList)
-    deallocate(checkList)
-    update => NULL()
-    check=>NULL()
-    domain%initialized = .true.
-
-  end subroutine compute_overlaps_fold_south
-
-  !####################################################################################
-  !> Computes remote domain overlaps
-  !! assumes only one in each direction
-  !! will calculate the overlapping for T,E,C,N-cell separately.
-  subroutine compute_overlaps_fold_west( domain, position, ishift, jshift)
-    type(domain2D), intent(inout) :: domain
-    integer, intent(in)           :: position, ishift, jshift
-
-    integer                          :: j, m, n, nlist, tMe, tNbr, dir
-    integer                          :: is, ie, js, je, isc, iec, jsc, jec, isd, ied, jsd, jed
-    integer                          :: isg, ieg, jsg, jeg, ioff, joff
-    integer                          :: list, middle, ni, nj, isgd, iegd, jsgd, jegd
-    integer                          :: ism, iem, jsm, jem, whalo, ehalo, shalo, nhalo
-    logical                          :: folded
-    type(overlap_type)               :: overlap
-    type(overlapSpec),   pointer     :: update=>NULL()
-    type(overlap_type)               :: overlapList(MAXLIST)
-    type(overlap_type)               :: checkList(MAXLIST)
-    type(overlapSpec),   pointer     :: check =>NULL()
-    integer                          :: nsend, nrecv
-    integer                          :: nsend_check, nrecv_check
-    integer                          :: iunit
-
-    !--- since we restrict that if multiple tiles on one pe, all the tiles are limited to this pe.
-    !--- In this case, if ntiles on this pe is greater than 1, no overlapping between processor within each tile
-    !--- In this case the overlapping exist only for tMe=1 and tNbr=1
-    if(size(domain%x(:)) > 1) return
-
-    !--- if there is no halo, no need to compute overlaps.
-    if(domain%whalo==0 .AND. domain%ehalo==0 .AND. domain%shalo==0 .AND. domain%nhalo==0) return
-
-    !--- when there is only one tile, n will equal to np
-    nlist = size(domain%list(:))
-
-    select case(position)
-    case (CENTER)
-       update => domain%update_T
-       check  => NULL()
-    case (CORNER)
-       update => domain%update_C
-       check  => domain%check_C
-    case (EAST)
-       update => domain%update_E
-       check  => domain%check_E
-    case (NORTH)
-       update => domain%update_N
-       check  => domain%check_N
-    case default
-       call mpp_error(FATAL, "mpp_domains_define.inc(compute_overlaps_fold_west):"//&
-                           & " the value of position should be CENTER, EAST, CORNER or NORTH")
-    end select
-
-    !--- overlap is used to store the overlapping temporarily.
-    call allocate_update_overlap( overlap, MAXOVERLAP)
-
-    !send
-    call mpp_get_compute_domain( domain, isc, iec, jsc, jec, position=position )
-    call mpp_get_global_domain ( domain, isg, ieg, jsg, jeg, xsize=ni, ysize=nj, position=position ) !cyclic offsets
-    call mpp_get_memory_domain ( domain, ism, iem, jsm, jem, position=position )
-    update%xbegin = ism; update%xend = iem
-    update%ybegin = jsm; update%yend = jem
-    if(ASSOCIATED(check)) then
-       check%xbegin  = ism; check%xend  = iem
-       check%ybegin  = jsm; check%yend  = jem
-    endif
-    update%whalo  = domain%whalo; update%ehalo = domain%ehalo
-    update%shalo  = domain%shalo; update%nhalo = domain%nhalo
-    whalo         = domain%whalo; ehalo        = domain%ehalo
-    shalo         = domain%shalo; nhalo        = domain%nhalo
-
-    ioff = ni - ishift
-    joff = nj - jshift
-    middle = (jsg+jeg)/2+1
-    tMe = 1; tNbr = 1
-
-    if(.NOT. BTEST(domain%fold,WEST)) then
-       call mpp_error(FATAL, "mpp_domains_define.inc(compute_overlaps_fold_west): "//&
-            "boundary condition in y-direction should be folded-west for "//trim(domain%name))
-    endif
-    if(.NOT. domain%y(tMe)%cyclic) then
-       call mpp_error(FATAL, "mpp_domains_define.inc(compute_overlaps_fold_west): "//&
-            "boundary condition in y-direction should be cyclic for "//trim(domain%name))
-    endif
-
-    if(.not. domain%symmetry) then
-       call mpp_error(FATAL, "mpp_domains_define.inc(compute_overlaps_fold_west): "//&
-            "when west boundary is folded, the domain must be symmetry for "//trim(domain%name))
-    endif
-
-    nsend = 0
-    nsend_check = 0
-    do list = 0,nlist-1
-       m = mod( domain%pos+list, nlist )
-       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then  ! only compute the overlapping within tile.
-          !to_pe's eastern halo
-          dir = 1
-          is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
-          js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir, symmetry=domain%symmetry)
-
-          !to_pe's SE halo
-          dir = 2
-          is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
-          js = domain%list(m)%y(tNbr)%compute%begin-shalo;    je = domain%list(m)%y(tNbr)%compute%begin-1
-          if( js.LT.jsg .AND. jsc.GT.je )then ! cyclic is assumed
-             js = js+joff; je = je+joff
-          end if
-
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                       is, ie, js, je, isc, iec, jsc, jec, dir)
-
-          !to_pe's southern halo
-          dir = 3
-          is = domain%list(m)%x(tNbr)%compute%begin; ie = domain%list(m)%x(tNbr)%compute%end+ishift
-          js = domain%list(m)%y(tNbr)%compute%begin-shalo; je = domain%list(m)%y(tNbr)%compute%begin-1
-          !--- to make sure the consistence between pes
-          if( (position == EAST .OR. position == CORNER ) .AND. ( isc == ie .or. iec == is ) ) then
-             !--- do nothing, this point will come from other pe
-          else
-             if( js.LT.jsg .AND. jsc.GT.je) then ! cyclic offset
-                js = js+joff; je = je+joff
-             endif
-
-             !--- when the west face is folded, the south halo points at
-             !--- the position should be on CORNER or EAST
-             if( is == isg .AND. (position == CORNER .OR. position == EAST) &
-                  .AND. ( domain%list(m)%y(tNbr)%compute%begin == jsg .OR. &
-                  & domain%list(m)%y(tNbr)%compute%begin-1 .GE. middle)) then
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is+1, ie, js, je, isc, iec, jsc, jec, dir)
-                is = domain%list(m)%x(tNbr)%compute%begin; ie = is
-                js = domain%list(m)%y(tNbr)%compute%begin-shalo;    je = domain%list(m)%y(tNbr)%compute%begin-1
-                if ( domain%list(m)%y(tNbr)%compute%begin == jsg ) then
-                   select case (position)
-                   case(EAST)
-                      j=js; js = 2*jsg-je-1; je = 2*jsg-j-1
-                   case(CORNER)
-                      j=js; js = 2*jsg-je-2+2*jshift; je = 2*jsg-j-2+2*jshift
-                   end select
-                   if(je .GT. domain%y(tMe)%compute%end+jshift) call mpp_error( FATAL, &
-                        'mpp_domains_define.inc(compute_overlaps_fold_west: south edge ubound error send.' )
-                else
-                   select case (position)
-                   case(EAST)
-                      j=js; js = jsg+jeg-je; je = jsg+jeg-j
-                   case(CORNER)
-                      j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
-                   end select
-                end if
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
-             else
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, symmetry=domain%symmetry)
-             end if
-          endif
-
-          !to_pe's SW halo
-          dir = 4
-          folded = .false.
-          is = domain%list(m)%x(tNbr)%compute%begin-whalo; ie = domain%list(m)%x(tNbr)%compute%begin-1
-          js = domain%list(m)%y(tNbr)%compute%begin-shalo; je = domain%list(m)%y(tNbr)%compute%begin-1
-          if( jsg.GT.js .AND. je.LT.jsc )then !cyclic offset
-             js = js+joff; je = je+joff
-          end if
-          if( is.LT.isg )then
-             folded = .TRUE.
-             call get_fold_index_west(jsg, jeg, isg, jshift, position, is, ie, js, je)
-          end if
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir, folded)
-          !--- when south edge is folded, js will be less than jsg when position is EAST and CORNER
-          if(js .LT. jsg) then
-             js = js + joff
-             call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                         is, ie, js, js, isc, iec, jsc, jec, dir, folded)
-          endif
-
-          !to_pe's western halo
-          dir = 5
-          folded = .FALSE.
-          is = domain%list(m)%x(tNbr)%compute%begin-whalo;    ie = domain%list(m)%x(tNbr)%compute%begin-1
-          js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
-          if( isg.GT.is )then
-             folded = .true.
-             call get_fold_index_west(jsg, jeg, isg, jshift, position, is, ie, js, je)
-          end if
-          !--- when domain symmetry and position is EAST or CORNER, the point when isc == ie,
-          !--- no need to send, because the data on that point will come from other pe.
-          !--- come from two pe ( there will be only one point on one pe. ).
-          if( (position == EAST .OR. position == CORNER ) .AND. ( jsc == je .or. jec == js ) ) then
-             !--- do nothing, this point will come from other pe
-          else
-             call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                         is, ie, js, je, isc, iec, jsc, jec, dir, folded, symmetry=domain%symmetry)
-          endif
-          !--- when south edge is folded, ie will be less than isg when position is EAST and CORNER
-          if(js .LT. jsg) then
-             js = js + ioff
-             call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                         is, ie, js, js, isc, iec, jsc, jec, dir, folded)
-          endif
-
-          !to_pe's NW halo
-          dir = 6
-          folded = .false.
-          is = domain%list(m)%x(tNbr)%compute%begin-whalo;    ie = domain%list(m)%x(tNbr)%compute%begin-1
-          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
-          if( je.GT.jeg .AND. jec.LT.js )then ! cyclic offset
-             js = js-joff; je = je-joff
-          end if
-          if( is.LT.isg )then
-             folded = .TRUE.
-             call get_fold_index_west(jsg, jeg, isg, jshift, position, is, ie, js, je)
-          end if
-
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir, folded)
-
-          !to_pe's northern halo
-          dir = 7
-          is = domain%list(m)%x(tNbr)%compute%begin; ie = domain%list(m)%x(tNbr)%compute%end+ishift
-          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
-          !--- to make sure the consistence between pes
-          if( (position == EAST .OR. position == CORNER ) .AND. ( isc == ie .or. iec == is ) ) then
-             !--- do nothing, this point will come from other pe
-          else
-             if( je.GT.jeg .AND. jec.LT.js) then ! cyclic offset
-                js = js-joff; je = je-joff
-             endif
-             !--- when the west face is folded, the south halo points at
-             !--- the position should be on CORNER or EAST
-             if( is == isg .AND. (position == CORNER .OR. position == EAST) &
-                  .AND. ( js .GE. middle .AND. domain%list(m)%y(tNbr)%compute%end+nhalo+jshift .LE. jeg ) ) then
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is+1, ie, js, je, isc, iec, jsc, jec, dir)
-                is = domain%list(m)%x(tNbr)%compute%begin; ie = is
-                js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
-                select case (position)
-                case(EAST)
-                   j=js; js = jsg+jeg-je; je = jsg+jeg-j
-                case(CORNER)
-                   j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
-                end select
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
-             else
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, symmetry=domain%symmetry)
-             end if
-          endif
-
-          !to_pe's NE halo
-          dir = 8
-          is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
-          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
-          if( je.GT.jeg .AND. jec.LT.js )then !cyclic offset
-             js = js-joff; je = je-joff
-          end if
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir)
-
-          !--- Now calculate the overlapping for fold-edge.
-          !--- only position at EAST and CORNER need to be considered
-          if( ( position == EAST .OR. position == CORNER) ) then
-            !fold is within domain
-             if( domain%x(tMe)%compute%begin-whalo .LE. isg .AND. isg .LE. domain%x(tMe)%domain_data%end+ishift )then
-                dir = 5
-                !--- calculate the overlapping for sending
-                if( domain%y(tMe)%pos .LT. (size(domain%y(tMe)%list(:))+1)/2 )then
-                   is = domain%list(m)%x(tNbr)%compute%begin;   ie = is
-                   if( is == isg )then   ! fold is within domain.
-                      js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
-                      select case (position)
-                      case(EAST)
-                         js = max(js, middle)
-                         j=js; js = jsg+jeg-je; je = jsg+jeg-j
-                      case(CORNER)
-                         js = max(js, middle)
-                         j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
-                      end select
-                      call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                                 is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
-                      is = max(is, isc); ie = min(ie, iec)
-                      js = max(js, jsc); je = min(je, jec)
-                      if(debug_update_level .NE. NO_CHECK .AND. ie.GE.is .AND. je.GE.js )then
-                         nsend_check = nsend_check+1
-                         call allocate_check_overlap(checkList(nsend_check), 1)
-                         call insert_check_overlap(checkList(nsend_check), domain%list(m)%pe, &
-                                                   tMe, 3, ONE_HUNDRED_EIGHTY, is, ie, js, je)
-                      end if
-                   end if
-                end if
-             end if
-          end if
-       end if
-       !--- copy the overlapping information
-       if( overlap%count > 0) then
-         nsend = nsend + 1
-         if(nsend > MAXLIST) call mpp_error(FATAL,  &
-             "mpp_domains_define.inc(compute_overlaps_west): nsend is greater than MAXLIST, increase MAXLIST")
-         call add_update_overlap(overlapList(nsend), overlap)
-         call init_overlap_type(overlap)
-       endif
-    end do  ! end of send set up.
-
-    if(debug_message_passing) then
-       !--- write out send information
        iunit = mpp_pe() + 1000
        do m =1,nsend
           write(iunit, *) "********to_pe = " ,overlapList(m)%pe, " count = ",overlapList(m)%count
@@ -3971,262 +3302,297 @@ end subroutine check_message_size
        enddo
        if(nsend >0) flush(iunit)
     endif
-
-   ! copy the overlapping information into domain data structure
     if(nsend>0) then
-       update%nsend = nsend
-       if (associated(update%send)) deallocate(update%send) !< Check if associated
+       if (associated(update%send)) deallocate(update%send)
        allocate(update%send(nsend))
+       update%nsend = nsend
        do m = 1, nsend
-          call add_update_overlap( update%send(m), overlapList(m) )
+          call add_update_overlap(update%send(m), overlapList(m))
        enddo
     endif
-
     if(nsend_check>0) then
        check%nsend = nsend_check
-       if (associated(check%send)) deallocate(check%send) !< Check if associated
+       if (associated(check%send)) deallocate(check%send)
        allocate(check%send(nsend_check))
        do m = 1, nsend_check
-          call add_check_overlap( check%send(m), checkList(m) )
+          call add_check_overlap(check%send(m), checkList(m))
        enddo
     endif
-
-    do m = 1, MAXLIST
+    do m = 1,size(overlapList(:))
        call deallocate_overlap_type(overlapList(m))
-       if(debug_update_level .NE. NO_CHECK) call deallocate_overlap_type(checkList(m))
     enddo
-
-    isgd = isg - domain%whalo
-    iegd = ieg + domain%ehalo
-    jsgd = jsg - domain%shalo
-    jegd = jeg + domain%nhalo
-
-    ! begin setting up recv
+    if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+       do m = 1,size(checkList(:))
+          call deallocate_overlap_type(checkList(m))
+       enddo
+    endif
     nrecv = 0
     nrecv_check = 0
     do list = 0,nlist-1
        m = mod( domain%pos+nlist-list, nlist )
-       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then  ! only compute the overlapping within tile.
+       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then
           isc = domain%list(m)%x(1)%compute%begin; iec = domain%list(m)%x(1)%compute%end+ishift
-          jsc = domain%list(m)%y(1)%compute%begin; jec = domain%list(m)%y(1)%compute%end+jshift
-          !recv_e
+          jec = jshift+domain%list(m)%y(1)%compute%end; jsc = domain%list(m)%y(1)%compute%begin
+          if(jsc == jsg) &
+               jsc = max(jfold, domain%y(tMe)%list(domain%list(m)%y(1)%pos)%memory%begin)
+
+          ! Receive into the eastern halo.
           dir = 1
-          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%domain_data%end+ishift
-          jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isd, ied, jsd, jed, dir, symmetry=domain%symmetry)
+          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%compute%end+ehalo+ishift
+          jed = jshift+domain%y(tMe)%compute%end; jsd = domain%y(tMe)%compute%begin
+          is = isc; ie = iec; je = jec; js = jsc
+          if( domain%symmetry .AND. (position == NORTH .OR. position == CORNER ) &
+               .AND. ( jed == js .or. jsd == je ) ) then
+          else
+             if( jsd == jfold .AND. (position == CORNER .OR. position == NORTH) ) then
+                call fill_overlap_recv_fold_south(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, isg, ieg, &
+                     dir, ishift, position, ioff, middle)
+             else
+                call fill_overlap_recv_nofold(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, isg, ieg, dir, &
+                     ioff, domain%x(tMe)%cyclic)
+             endif
+          endif
 
-          !recv_se
-          dir = 2
-          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%domain_data%end+ishift
-          jsd = domain%y(tMe)%domain_data%begin;    jed = domain%y(tMe)%compute%begin-1
-          is=isc; ie=iec; js=jsc; je=jec
-          if( jsd.LT.jsg .AND. js.GE.jed )then ! cyclic is assumed
-             js = js-joff; je = je-joff
-          end if
-          call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                     is, ie, js, je, isd, ied, jsd, jed, dir)
+          ! Receive into the northeastern halo.
+          dir = 8
+          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%compute%end+ehalo+ishift
+          jed = jshift+domain%y(tMe)%compute%end+nhalo;    jsd = jshift+domain%y(tMe)%compute%end+1
+          is = isc; ie = iec; je = jec; js = jsc
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          call fill_overlap_recv_nofold(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, isg, ieg, dir, ioff, &
+               domain%x(tMe)%cyclic)
+          if(js2 .LE. je2) call fill_overlap_recv_nofold(overlap, domain, m, is, ie, js2, je2, isd, ied, jsd, jed, &
+               isg, ieg, dir, ioff, domain%x(tMe)%cyclic)
 
-          !recv_s
+          ! Receive into the northern halo.
+          dir = 7
+          isd = domain%x(tMe)%compute%begin; ied = domain%x(tMe)%compute%end+ishift
+          jed = jshift+domain%y(tMe)%compute%end+nhalo;    jsd = jshift+domain%y(tMe)%compute%end+1
+          is = isc; ie = iec; je = jec; js = jsc
+          js2 = 0; je2 = -1
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isd, ied, jsd, jed, dir, &
+               symmetry=domain%symmetry)
+          if(js2 .LE. je2) call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js2, je2, isd, ied, jsd, &
+               jed, dir, symmetry=domain%symmetry)
+
+          ! Receive into the northwestern halo.
+          dir = 6
+          isd = domain%x(tMe)%compute%begin-whalo; ied = domain%x(tMe)%compute%begin-1
+          jed = jshift+domain%y(tMe)%compute%end+nhalo; jsd = jshift+domain%y(tMe)%compute%end+1
+          is = isc; ie = iec; je = jec; js = jsc
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          if( ied.LT.isg )then
+             if( domain%x(tMe)%cyclic ) then
+                is = is-ioff; ie = ie-ioff
+             endif
+          else if (isd.LT.isg )then
+             if( domain%x(tMe)%cyclic ) then
+                is2 = is-ioff; ie2 = ie-ioff
+             endif
+          endif
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isd, ied, jsd, jed, dir)
+          if(ie2 .GE. is2)call insert_update_overlap(overlap, domain%list(m)%pe, &
+               is2, ie2, js, je, isd, ied, jsd, jed, dir)
+          if(js2 .LE. je2)call insert_update_overlap(overlap, domain%list(m)%pe, &
+               is, ie, js2, je2, isd, ied, jsd, jed, dir)
+          if(ie2 .GE. is2 .AND. js2 .LE. je2)call insert_update_overlap(overlap, domain%list(m)%pe, is2, ie2, js2, &
+               je2, isd, ied, jsd, jed, dir)
+
+          ! Receive into the western halo.
+          dir = 5
+          isd = domain%x(tMe)%compute%begin-whalo;    ied = domain%x(tMe)%compute%begin-1
+          jed = jshift+domain%y(tMe)%compute%end; jsd = domain%y(tMe)%compute%begin
+          is = isc; ie = iec; je = jec; js = jsc
+          if( jsd == jfold .AND. (position == CORNER .OR. position == NORTH) ) then
+             call fill_overlap_recv_fold_south(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, isg, ieg, dir, &
+                  ishift, position, ioff, middle)
+          else
+             call fill_overlap_recv_nofold(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, isg, ieg, dir, &
+                  ioff, domain%x(tMe)%cyclic, symmetry=domain%symmetry)
+          endif
+
+          ! Receive into the southwestern halo.
+          dir = 4
+          folded = .false.
+          isd = domain%x(tMe)%compute%begin-whalo;    ied = domain%x(tMe)%compute%begin-1
+          jed = domain%y(tMe)%compute%begin-1; jsd = domain%y(tMe)%compute%begin-shalo
+          is = isc; ie = iec; je = jec; js = jsc
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          is3 = 0; ie3 = -1; js3 = 0; je3 = -1
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          if( jed .LT. jfold ) then
+             folded = .TRUE.
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+          else if( jsd .LT. jfold )then
+             folded = .TRUE.
+             is2 = is; ie2 = ie; je2 = je; js2 = js
+             isd2 = isd; ied2 = ied; jed2 = jed; jsd2 = jfold
+             jed = jfold-1
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+             if(isd < isg .and. ied .GE. isg .and. domain%symmetry) then
+                isd3 = isd; ied3 = isg-1
+                jed3 = jed; jsd3 = jsd
+                is3 = is-ioff; ie3 = ie-ioff
+                je3 = je; js3 = js
+                isd = isg;
+             endif
+          endif
+          if( jfold .LE. je .AND. jfold .GE. js .AND. jsd == jfold &
+               .AND. (position == CORNER .OR. position == NORTH)) then
+             call fill_overlap_recv_fold_south(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, isg, ieg, dir, &
+                  ishift, position, ioff, middle)
+          else
+             call fill_overlap_recv_nofold(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, isg, ieg, dir, &
+                  ioff, domain%x(tMe)%cyclic, folded)
+          endif
+          if(ie3 .GE. is3) call fill_overlap_recv_nofold(overlap, domain, m, is3, ie3, js3, je3, isd3, ied3, jsd3, &
+               jed3, isg, ieg, dir, ioff, domain%x(tMe)%cyclic, folded)
+          if(ie2 .GE. is2) then
+             if( jfold .LE. je2 .AND. jfold .GE. js2 .AND. jsd2 == jfold &
+                  .AND. (position == CORNER .OR. position == NORTH)) then
+                call fill_overlap_recv_fold_south(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, &
+                     isg, ieg, dir, ishift, position, ioff, middle)
+             else
+                call fill_overlap_recv_nofold(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, isg, &
+                     ieg, dir, ioff, domain%x(tMe)%cyclic)
+             endif
+          endif
+          if(is .LT. isg .AND. domain%x(tMe)%cyclic) then
+             is = is + ioff
+             call insert_update_overlap(overlap, domain%list(m)%pe, is, is, js, je, isd, ied, jsd, jed, dir, folded)
+          endif
+
+          ! Receive into the southern halo.
           dir = 3
           folded = .false.
           isd = domain%x(tMe)%compute%begin; ied = domain%x(tMe)%compute%end+ishift
-          jsd = domain%y(tMe)%domain_data%begin;    jed = domain%y(tMe)%compute%begin-1
-          is=isc; ie=iec; js=jsc; je=jec
-
-          if( (position == EAST .OR. position == CORNER ) .AND. ( isd == ie .or. ied == is ) ) then
-             !--- do nothing, this point will come from other pe
+          jed = domain%y(tMe)%compute%begin-1; jsd = domain%y(tMe)%compute%begin-shalo
+          is = isc; ie = iec; je = jec; js = jsc
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          if( jed .LT. jfold ) then
+             folded = .TRUE.
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+          else if( jsd .LT. jfold )then
+             folded = .TRUE.
+             is2 = is; ie2 = ie; je2 = je; js2 = js
+             isd2 = isd; ied2 = ied; jed2 = jed; jsd2 = jfold
+             jed = jfold-1
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+          end if
+          if( jfold .LE. je .AND. jfold .GE. js .AND. jsd == jfold &
+               .AND. (position == CORNER .OR. position == NORTH)) then
+             call fill_overlap_recv_fold_south(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, isg, ieg, dir, &
+                  ishift, position, ioff, middle, symmetry=domain%symmetry)
           else
-             if( jsd.LT.jsg .AND. js .GT. jed)then
-                js = js-joff; je = je-joff
-             end if
-             !--- when the west face is folded, the south halo points at
-             !--- the position should be on CORNER or EAST
-             if( isd == isg .AND. (position == CORNER .OR. position == EAST) &
-                  .AND. ( jsd < jsg .OR. jed .GE. middle ) ) then
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd+1, ied, jsd, jed, dir)
-                is=isc; ie=iec; js=jsc; je=jec
-                if(jsd<jsg) then
-                   select case (position)
-                   case(EAST)
-                      j=js; js = 2*jsg-je-1; je = 2*jsg-j-1
-                   case(CORNER)
-                      j=js; js = 2*jsg-je-2+2*jshift; je = 2*jsg-j-2+2*jshift
-                   end select
-                   if(je .GT. domain%y(tMe)%compute%end+jshift) call mpp_error( FATAL, &
-                        'mpp_domains_define.inc(compute_overlaps_fold_west: south edge ubound error recv.' )
-                else
-                   select case (position)
-                   case(EAST)
-                      j=js; js = jsg+jeg-je; je = jsg+jeg-j
-                   case(CORNER)
-                      j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
-                   end select
-                end if
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd, isd, jsd, jed, dir, .true.)
+             call fill_overlap_recv_nofold(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, isg, ieg, dir, &
+                  ioff, domain%x(tMe)%cyclic, folded, symmetry=domain%symmetry)
+          endif
+          if(ie2 .GE. is2) then
+             if(jfold .LE. je2 .AND. jfold .GE. js2 .AND. jsd2 == jfold &
+                  .AND. (position == CORNER .OR. position == NORTH)) then
+                call fill_overlap_recv_fold_south(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, &
+                     isg, ieg, dir, ishift, position, ioff, middle, symmetry=domain%symmetry)
              else
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd, ied, jsd, jed, dir, symmetry=domain%symmetry)
-             end if
+                call fill_overlap_recv_nofold(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, isg, &
+                     ieg, dir, ioff, domain%x(tMe)%cyclic, folded, symmetry=domain%symmetry)
+             endif
           endif
 
-          !recv_sw
-          dir = 4
-          folded = .false.
-          isd = domain%x(tMe)%domain_data%begin; ied = domain%x(tMe)%compute%begin-1
-          jsd = domain%y(tMe)%domain_data%begin; jed = domain%y(tMe)%compute%begin-1
-          is=isc; ie=iec; js=jsc; je=jec
-          if( isd.LT.isg )then
-             folded = .true.
-             call get_fold_index_west(jsg, jeg, isg, jshift, position, is, ie, js, je)
-          end if
-          if( jsd.LT.jsg .AND. js.GT.jed ) then ! cyclic offset
-             js = js-joff; je = je-joff
-          end if
-          call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                     is, ie, js, je, isd, ied, jsd, jed, dir, folded)
-          !--- when west edge is folded, js will be less than jsg when position is EAST and CORNER
-          if(js .LT. jsg ) then
-             js = js + joff
-             call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                        is, ie, js, js, isd, ied, jsd, jed, dir, folded )
-          endif
-
-          !recv_w
-          dir = 5
-          folded = .false.
-          isd = domain%x(tMe)%domain_data%begin;    ied = domain%x(tMe)%compute%begin-1
-          jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if( isd.LT.isg )then
-             folded = .true.
-             call get_fold_index_west(jsg, jeg, isg, jshift, position, is, ie, js, je)
-          end if
-          if( (position == EAST .OR. position == CORNER ) .AND. (jsd == je .or. jed == js ) ) then
-             !--- do nothing, this point will come from other pe
-          else
-             call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                        is, ie, js, je, isd, ied, jsd, jed, dir, folded, symmetry=domain%symmetry)
-          end if
-          !--- when west edge is folded, js will be less than jsg when position is EAST and CORNER
-          if(js .LT. jsg ) then
-             js = js + joff
-             call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                        is, ie, js, js, isd, ied, jsd, jed, dir, folded)
-          endif
-
-          !recv_nw
-          dir = 6
-          folded = .false.
-          isd = domain%x(tMe)%domain_data%begin;    ied = domain%x(tMe)%compute%begin-1
-          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%domain_data%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if( isd.LT.isg) then
-             folded = .true.
-             call get_fold_index_west(jsg, jeg, isg, jshift, position, is, ie, js, je)
-          end if
-          if( jed.GT.jeg .AND. je.LT.jsd )then !cyclic offset
-             js = js+joff; je = je+joff
-          endif
-
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isd, ied, jsd, jed, dir)
-
-          !recv_n
-          dir = 7
-          folded = .false.
-          isd = domain%x(tMe)%compute%begin; ied = domain%x(tMe)%compute%end+ishift
-          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%domain_data%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if( (position == EAST .OR. position == CORNER ) .AND. ( isd == ie .or. ied == is ) ) then
-             !--- do nothing, this point will come from other pe
-          else
-             if( jed.GT.jeg .AND. je.LT.jsd)then
-                js = js+joff; je = je+joff
-             end if
-             !--- when the west face is folded, the south halo points at
-             !--- the position should be on CORNER or EAST
-             if( isd == isg .AND. (position == CORNER .OR. position == EAST) &
-                  .AND. jsd .GE. middle .AND. jed .LE. jeg ) then
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd+1, ied, jsd, jed, dir)
-                is=isc; ie=iec; js=jsc; je=jec
+          ! Fill redundant fold-line points in the upper tangential half.
+          if( (position == NORTH .OR. position == CORNER) &
+               .AND. domain%x(tMe)%pos .GE. size(domain%x(tMe)%list(:))/2) then
+             if( jsd .LE. jfold .AND. ied .GE. middle)then
+                jed = jfold; jsd = jfold
+                is = isc; ie = iec; je = jec; js = jsc
+                isd = max(isd, middle)
                 select case (position)
-                case(EAST)
-                   j=js; js = jsg+jeg-je; je = jsg+jeg-j
+                case(NORTH)
+                   i = is; is = isg+ieg-ie; ie = isg+ieg-i
                 case(CORNER)
-                   j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
+                   i = is; is = isg+ieg-ie-1+ishift; ie = isg+ieg-i-1+ishift
                 end select
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd, isd, jsd, jed, dir, .true.)
-             else
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd, ied, jsd, jed, dir, symmetry=domain%symmetry)
-             end if
+                call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isd, ied, jsd, jed, dir, .true.)
+             endif
+             if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+                jed = domain%y(tMe)%compute%begin
+                if(jed == jsg .AND. jsm <= jfold) &
+                     jed = jfold
+                jsd = jed
+                if(jsd == jfold) then
+                   is = max(is, isd); ie = min(ie, ied)
+                   je = min(je, jed); js = max(js, jsd)
+                   if(ie.GE.is .AND. js .LE. je )then
+                      nrecv_check = nrecv_check+1
+                      if(nrecv_check > size(checkList(:)) ) then
+                         call expand_check_overlap_list(checkList, nlist)
+                      endif
+                      call allocate_check_overlap(checkList(nrecv_check), 1)
+                      call insert_check_overlap(checkList(nrecv_check), domain%list(m)%pe, tMe, 4, &
+                           ONE_HUNDRED_EIGHTY, is, ie, js, je)
+                   end if
+                end if
+             endif
           endif
 
-          !recv_ne
-          dir = 8
-          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%domain_data%end+ishift
-          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%domain_data%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if(  jed.GT.jeg .AND. je.LT.jsd )then ! cyclic offset
-             js = js+joff; je = je+joff
-          end if
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isd, ied, jsd, jed, dir)
-
-          !--- Now calculate the overlapping for fold-edge.
-          !--- for folded-south-edge, only need to consider to_pe's south(3) direction
-          !--- only position at EAST and CORNER need to be considered
-          if( ( position == EAST .OR. position == CORNER) ) then
-            !fold is within domain
-             if( domain%x(tMe)%domain_data%begin .LE. isg .AND. isg .LE. domain%x(tMe)%domain_data%end+ishift )then
-                dir = 5
-                !--- calculating overlapping for receving on north
-                if( domain%y(tMe)%pos .GE. size(domain%y(tMe)%list(:))/2 )then
-                   isd = domain%x(tMe)%compute%begin;   ied = isd
-                   if( isd == isg )then   ! fold is within domain.
-                      jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
-                      is=isc; ie=iec; js = jsc; je = jec
-                      select case (position)
-                      case(EAST)
-                         jsd = max(jsd, middle)
-                         j=js; js = jsg+jeg-je; je = jsg+jeg-j
-                      case(CORNER)
-                         jsd = max(jsd, middle)
-                         j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
-                      end select
-                      call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                                 is, ie, js, je, isd, ied, jsd, jed, dir, .TRUE.)
-                      is = max(is, isd); ie = min(ie, ied)
-                      js = max(js, jsd); je = min(je, jed)
-                      if(debug_update_level .NE. NO_CHECK .AND. ie.GE.is .AND. je.GE.js )then
-                         nrecv_check = nrecv_check+1
-                         call allocate_check_overlap(checkList(nrecv_check), 1)
-                         call insert_check_overlap(checkList(nrecv_check), domain%list(m)%pe, &
-                                                   tMe, 3, ONE_HUNDRED_EIGHTY, is, ie, js, je)
-                      endif
-                   endif
-                endif
+          ! Receive into the southeastern halo.
+          dir = 2
+          folded = .false.
+          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%compute%end+ehalo+ishift
+          jed = domain%y(tMe)%compute%begin-1; jsd = domain%y(tMe)%compute%begin-shalo
+          is = isc; ie = iec; je = jec; js = jsc
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          is3 = 0; ie3 = -1; js3 = 0; je3 = -1
+          is2 = 0; ie2 = -1; js2 = 0; je2 = -1
+          if( jed .LT. jfold ) then
+             folded = .TRUE.
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+          else if( jsd .LT. jfold )then
+             folded = .TRUE.
+             is2 = is; ie2 = ie; je2 = je; js2 = js
+             isd2 = isd; ied2 = ied; jed2 = jed; jsd2 = jfold
+             jed = jfold-1
+             call get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+             if(ied > ieg .and. isd .LE. ieg .and. domain%symmetry) then
+                isd3 = ieg+1; ied3 = ied
+                jed3 = jed; jsd3 = jsd
+                is3 = is+ioff; ie3 = ie+ioff
+                je3 = je; js3 = js
+                ied = ieg;
+             endif
+          endif
+          if( jfold .LE. je .AND. jfold .GE. js .AND. jsd == jfold &
+               .AND. (position == CORNER .OR. position == NORTH)) then
+             call fill_overlap_recv_fold_south(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, isg, ieg, dir, &
+                  ishift, position, ioff, middle)
+          else
+             call fill_overlap_recv_nofold(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, isg, ieg, dir, &
+                  ioff, domain%x(tMe)%cyclic, folded)
+          endif
+          if(ie3 .GE. is3) call fill_overlap_recv_nofold(overlap, domain, m, is3, ie3, js3, je3, isd3, ied3, jsd3, &
+               jed3, isg, ieg, dir, ioff, domain%x(tMe)%cyclic, folded)
+          if(ie2 .GE. is2) then
+             if(jfold .LE. je2 .AND. jfold .GE. js2 .AND. jsd2 == jfold &
+                  .AND. (position == CORNER .OR. position == NORTH)) then
+                call fill_overlap_recv_fold_south(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, &
+                     isg, ieg, dir, ishift, position, ioff, middle)
+             else
+                call fill_overlap_recv_nofold(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, isg, &
+                     ieg, dir, ioff, domain%x(tMe)%cyclic)
              endif
           endif
        endif
-       !--- copy the overlapping information
        if( overlap%count > 0) then
           nrecv = nrecv + 1
-         if(nrecv > MAXLIST) call mpp_error(FATAL,  &
-             "mpp_domains_define.inc(compute_overlaps_west): nrecv is greater than MAXLIST, increase MAXLIST")
-          call add_update_overlap( overlapList(nrecv), overlap)
+          if(nrecv > size(overlapList(:)) )then
+             call mpp_error(NOTE, &
+                  'mpp_domains_define.inc(compute_overlaps_fold_south): overlapList for recv is expanded')
+             call expand_update_overlap_list(overlapList, nlist)
+          endif
+          call add_update_overlap(overlapList(nrecv), overlap)
           call init_overlap_type(overlap)
        endif
-    enddo ! end of recv do loop
-
+    enddo
     if(debug_message_passing) then
-       !--- write out send information
        iunit = mpp_pe() + 1000
        do m =1,nrecv
           write(iunit, *) "********from_pe = " ,overlapList(m)%pe, " count = ",overlapList(m)%count
@@ -4237,14 +3603,12 @@ end subroutine check_message_size
        enddo
        if(nrecv >0) flush(iunit)
     endif
-
-    ! copy the overlapping information into domain
     if(nrecv>0) then
-       update%nrecv = nrecv
-       if (associated(update%recv)) deallocate(update%recv) !< Check if associated
+       if (associated(update%recv)) deallocate(update%recv)
        allocate(update%recv(nrecv))
+       update%nrecv = nrecv
        do m = 1, nrecv
-          call add_update_overlap( update%recv(m), overlapList(m) )
+          call add_update_overlap(update%recv(m), overlapList(m))
           do n = 1, update%recv(m)%count
              if(update%recv(m)%tileNbr(n) == domain%tile_id(tMe)) then
                 if(update%recv(m)%dir(n) == 1) domain%x(tMe)%loffset = 0
@@ -4253,651 +3617,1689 @@ end subroutine check_message_size
           enddo
        enddo
     endif
-
     if(nrecv_check>0) then
        check%nrecv = nrecv_check
-       if (associated(check%recv)) deallocate(check%recv) !< Check if associated
+       if (associated(check%recv)) deallocate(check%recv)
        allocate(check%recv(nrecv_check))
        do m = 1, nrecv_check
-          call add_check_overlap( check%recv(m), checkList(m) )
+          call add_check_overlap(check%recv(m), checkList(m))
        enddo
     endif
-
     call deallocate_overlap_type(overlap)
-    do m = 1, MAXLIST
+    do m = 1,size(overlapList(:))
        call deallocate_overlap_type(overlapList(m))
-       if(debug_update_level .NE. NO_CHECK) call deallocate_overlap_type(checkList(m))
     enddo
-
-    update=>NULL()
-    check=>NULL()
+    if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+       do m = 1,size(checkList(:))
+          call deallocate_overlap_type(checkList(m))
+       enddo
+    endif
+    deallocate(overlapList)
+    if(set_check) deallocate(checkList)
     domain%initialized = .true.
+  end subroutine compute_overlaps_fold_south
 
+  !####################################################################################
+  !> Computes remote domain overlaps
+  !! assumes only one in each direction
+  !! will calculate the overlapping for T,E,C,N-cell separately.
+  !! Exchange the Northern normal/tangential axes and reflect at lower x.
+  !! The fold constant is 2*isg-1 for CENTER/NORTH. EAST/CORNER reflect about
+  !! the physical fold line isg+ishift-1, in the nonsymmetric low halo.
+  subroutine compute_overlaps_fold_west(domain, position, update, check, ishift, jshift, whalo, ehalo, shalo, nhalo)
+    type(domain2D), intent(inout) :: domain
+    type(overlapSpec), intent(inout), pointer :: update
+    type(overlapSpec), intent(inout), pointer :: check
+    integer, intent(in)           :: position, jshift, ishift
+    integer, intent(in)           :: shalo, nhalo, whalo, ehalo
+    integer                          :: j, m, n, nlist, tMe, tNbr, dir
+    integer                          :: js, je, is, ie, jsc, jec, isc, iec, jsd, jed, isd, ied
+    integer                          :: jsg, jeg, isg, ieg, joff, ioff
+    integer                          :: list, middle, nj, ni
+    integer                          :: jsm, jem, ism, iem
+    integer                          :: js2, je2, is2, ie2
+    integer                          :: js3, je3, is3, ie3
+    integer                          :: jsd3, jed3, isd3, ied3
+    integer                          :: jsd2, jed2, isd2, ied2
+    integer                          :: ifold
+    logical                          :: folded
+    type(overlap_type)               :: overlap
+    type(overlap_type),  pointer     :: overlapList(:)=>NULL()
+    type(overlap_type),  pointer     :: checkList(:)=>NULL()
+    integer                          :: nsend, nrecv
+    integer                          :: nsend_check, nrecv_check
+    integer                          :: iunit
+    logical                          :: set_check
+    if(size(domain%y(:)) > 1) return
+    if(shalo==0 .AND. nhalo==0 .AND. whalo==0 .AND. ehalo==0) return
+    if(.NOT. domain%y(1)%cyclic) call mpp_error(FATAL, &
+         'compute_overlaps_fold_west: the tangential axis must be cyclic for '//trim(domain%name))
+    nlist = size(domain%list(:))
+    set_check = .false.
+    if(ASSOCIATED(check)) set_check = .true.
+    allocate(overlapList(MAXLIST) )
+    if(set_check) allocate(checkList(MAXLIST)   )
+    call allocate_update_overlap(overlap, MAXOVERLAP)
+    call mpp_get_compute_domain(domain, isc, iec, jsc, jec, position=position)
+    call mpp_get_global_domain(domain, isg, ieg, jsg, jeg, ysize=nj, xsize=ni, position=position)
+    call mpp_get_memory_domain(domain, ism, iem, jsm, jem, position=position)
+    update%ybegin = jsm; update%yend = jem
+    ifold = isg
+    if(position == EAST .OR. position == CORNER) &
+         ifold = isg+ishift-1
+    ! The nonsymmetric lower face is caller-owned halo data, not a compute point.
+    if(isc == isg) isc = max(ifold, ism)
+    update%xbegin = ism; update%xend = iem
+    if(set_check) then
+       check%ybegin  = jsm; check%yend  = jem
+       check%xbegin  = ism; check%xend  = iem
+    endif
+    update%shalo  = shalo; update%nhalo = nhalo
+    update%whalo  = whalo; update%ehalo = ehalo
+    joff = nj - jshift
+    ioff = ni - ishift
+    middle = jsg+(jeg-jsg)/2+1
+    tMe = 1; tNbr = 1
+    update%nsend = 0; update%nrecv = 0
+    if(set_check) then
+       check%nsend = 0; check%nrecv = 0
+    endif
+    nsend = 0
+    nsend_check = 0
+    do list = 0,nlist-1
+       m = mod( domain%pos+list, nlist )
+       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then
+
+          ! To the peer's northern halo.
+          dir = 7
+          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
+          ie = ishift+domain%list(m)%x(tNbr)%compute%end; is = domain%list(m)%x(tNbr)%compute%begin
+          if( domain%symmetry .AND. (position == EAST .OR. position == CORNER ) &
+               .AND. ( iec == is .or. isc == ie ) ) then
+          else
+             if( is == ifold .AND. (position == CORNER .OR. position == EAST) ) then
+                call fill_overlap_send_fold_west(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                     dir, jshift, position, joff, middle)
+             else
+                call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                     dir, joff, domain%y(tMe)%cyclic, symmetry=domain%symmetry)
+             endif
+          end if
+
+          ! To the peer's northeastern halo.
+          dir = 8
+          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
+          ie = ishift+domain%list(m)%x(tNbr)%compute%end+ehalo;  is = ishift+domain%list(m)%x(tNbr)%compute%end+1
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+               joff, domain%y(tMe)%cyclic)
+          if(is2 .LE. ie2) call fill_overlap_send_nofold_east(overlap, domain, m, is2, ie2, js, je, isc, iec, jsc, &
+               jec, jsg, jeg, dir, joff, domain%y(tMe)%cyclic)
+
+          ! To the peer's eastern halo.
+          dir = 1
+          js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
+          ie = ishift+domain%list(m)%x(tNbr)%compute%end+ehalo; is = ishift+domain%list(m)%x(tNbr)%compute%end+1
+          is2 = 0; ie2 = -1
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isc, iec, jsc, jec, dir, &
+               symmetry=domain%symmetry)
+          if(is2 .LE. ie2) call insert_update_overlap(overlap, domain%list(m)%pe, is2, ie2, js, je, isc, iec, jsc, &
+               jec, dir, symmetry=domain%symmetry)
+
+          ! To the peer's southeastern halo.
+          dir = 2
+          js = domain%list(m)%y(tNbr)%compute%begin-shalo; je = domain%list(m)%y(tNbr)%compute%begin-1
+          ie = ishift+domain%list(m)%x(tNbr)%compute%end+ehalo; is = ishift+domain%list(m)%x(tNbr)%compute%end+1
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+               joff, domain%y(tMe)%cyclic)
+          if(is2 .LE. ie2) call fill_overlap_send_nofold_east(overlap, domain, m, is2, ie2, js, je, isc, iec, jsc, &
+               jec, jsg, jeg, dir, joff, domain%y(tMe)%cyclic)
+
+          ! To the peer's southern halo.
+          dir = 3
+          js = domain%list(m)%y(tNbr)%compute%begin-shalo;    je = domain%list(m)%y(tNbr)%compute%begin-1
+          ie = ishift+domain%list(m)%x(tNbr)%compute%end; is = domain%list(m)%x(tNbr)%compute%begin
+          if( is == ifold .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_send_fold_west(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, symmetry=domain%symmetry)
+          end if
+
+          ! To the peer's southwestern halo.
+          dir = 4
+          js = domain%list(m)%y(tNbr)%compute%begin-shalo;  je = domain%list(m)%y(tNbr)%compute%begin-1
+          ie = domain%list(m)%x(tNbr)%compute%begin-1; is = domain%list(m)%x(tNbr)%compute%begin-whalo
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          js3 = 0; je3 = -1; is3 = 0; ie3 = -1
+          folded = .FALSE.
+          if(ie .LT. ifold) then
+             folded = .TRUE.
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+          else if(is .LT. ifold) then
+             folded = .TRUE.
+             js2 = js; je2 = je; ie2 = ie; is2 = ifold
+             ie = ifold-1
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+             if( js .GT. jeg) then
+                js = js - joff; je = je - joff
+             else if( je .GT. jeg ) then
+                js3 = js; je3 = jeg; ie3 = ie; is3 = is
+                js = jeg+1-joff; je = je - joff
+             endif
+          endif
+          ! Match the receive-side order: unwrapped piece before cyclic piece.
+          if(je3 .GE. js3) call fill_overlap_send_nofold_east(overlap, domain, m, is3, ie3, js3, je3, isc, iec, jsc, &
+               jec, jsg, jeg, dir, joff, domain%y(tMe)%cyclic, folded)
+          if( is == ifold .AND. isc == ifold .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_send_fold_west(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded)
+          endif
+          if(je2 .GE. js2) then
+             if(is2 == ifold .AND. isc == ifold.AND.(position == CORNER .OR. position == EAST))then
+                call fill_overlap_send_fold_west(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, jshift, position, joff, middle)
+             else
+                call fill_overlap_send_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, joff, domain%y(tMe)%cyclic)
+             endif
+          endif
+
+          ! To the peer's western halo.
+          dir = 5
+          folded = .FALSE.
+          js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
+          ie = domain%list(m)%x(tNbr)%compute%begin-1; is = domain%list(m)%x(tNbr)%compute%begin-whalo
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          if( ie .LT. ifold) then
+             folded = .TRUE.
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+          else if( is .LT. ifold )then
+             folded = .TRUE.
+             js2 = js; je2 = je; ie2 = ie; is2 = ifold
+             ie = ifold-1;
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+          end if
+          if( is == ifold .AND. isc == ifold .AND.(position == CORNER .OR. position == EAST))then
+             call fill_overlap_send_fold_west(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+                  jshift, position, joff, middle, domain%symmetry)
+          else
+             call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded, domain%symmetry)
+          endif
+          if(je2 .GE. js2) then
+             if(is2 == ifold .AND. isc == ifold .AND.(position == CORNER .OR. position == EAST))then
+                call fill_overlap_send_fold_west(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, jshift, position, joff, middle, domain%symmetry)
+             else
+                call fill_overlap_send_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, joff, domain%y(tMe)%cyclic, symmetry=domain%symmetry)
+             endif
+          endif
+
+          ! The lower tangential half owns the redundant fold-line points.
+          if( (position == EAST .OR. position == CORNER)  .AND. &
+               domain%y(tMe)%pos .LT. (size(domain%y(tMe)%list(:))+1)/2 ) then
+             if( domain%list(m)%x(tNbr)%compute%begin-whalo .LE. ifold .AND. jsc .LE. middle)then
+                ie = ifold; is = ifold
+                js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
+                js = max(js, middle)
+                select case (position)
+                case(EAST)
+                   j = js; js = jsg+jeg-je; je = jsg+jeg-j
+                case(CORNER)
+                   j = js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
+                end select
+                call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
+             endif
+             if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+                is = domain%list(m)%x(tNbr)%compute%begin;
+                if(is == isg .AND. &
+                     domain%x(tMe)%list(domain%list(m)%x(tNbr)%pos)%memory%begin <= ifold) &
+                     is = ifold
+                if(is == ifold) then
+                   js = max(js, jsc); je = min(je, jec)
+                   ie = min(ie, iec); is = max(is, isc)
+                   if(je.GE.js .AND. is .LE. ie )then
+                      nsend_check = nsend_check+1
+                      if(nsend_check > size(checkList(:)) ) then
+                         call expand_check_overlap_list(checkList, nlist)
+                      endif
+                      call allocate_check_overlap(checkList(nsend_check), 1)
+                      call insert_check_overlap(checkList(nsend_check), domain%list(m)%pe, tMe, 4, &
+                           ONE_HUNDRED_EIGHTY, is, ie, js, je)
+                   end if
+                end if
+             endif
+          endif
+
+          ! To the peer's northwestern halo.
+          dir = 6
+          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
+          ie = domain%list(m)%x(tNbr)%compute%begin-1; is = domain%list(m)%x(tNbr)%compute%begin-whalo
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          js3 = 0; je3 = -1; is3 = 0; ie3 = -1
+          folded = .FALSE.
+          if(ie .LT. ifold) then
+             folded = .TRUE.
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+          else if(is .LT. ifold) then
+             folded = .TRUE.
+             js2 = js; je2 = je; ie2 = ie; is2 = ifold
+             ie = ifold-1
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+             if( je .LT. jsg )then
+                js = js+joff; je = je+joff
+             else if( js .LT. jsg) then
+                js3 = jsg; je3 = je; ie3 = ie; is3 = is
+                js = js+joff; je = jsg-1+joff;
+             endif
+          endif
+          if(je3 .GE. js3) call fill_overlap_send_nofold_east(overlap, domain, m, is3, ie3, js3, je3, isc, iec, jsc, &
+               jec, jsg, jeg, dir, joff, domain%y(tMe)%cyclic, folded)
+          if( is == ifold .AND. isc == ifold .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_send_fold_west(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded)
+          endif
+          if(je2 .GE. js2) then
+             if(is2 == ifold .AND. isc == ifold .AND.(position == CORNER .OR. position == EAST))then
+                call fill_overlap_send_fold_west(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, jshift, position, joff, middle)
+             else
+                call fill_overlap_send_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, joff, domain%y(tMe)%cyclic)
+             endif
+          endif
+       endif
+       if( overlap%count > 0) then
+          nsend = nsend + 1
+          if(nsend > size(overlapList(:)) ) then
+             call mpp_error(NOTE, &
+                  'mpp_domains_define.inc(compute_overlaps_fold_west): overlapList for send js expanded')
+             call expand_update_overlap_list(overlapList, nlist)
+          endif
+          call add_update_overlap(overlapList(nsend), overlap)
+          call init_overlap_type(overlap)
+       endif
+    end do
+    if(debug_message_passing) then
+       iunit = mpp_pe() + 1000
+       do m =1,nsend
+          write(iunit, *) "********to_pe = " ,overlapList(m)%pe, " count = ",overlapList(m)%count
+          do n = 1, overlapList(m)%count
+             write(iunit, *) overlapList(m)%js(n), overlapList(m)%je(n), overlapList(m)%is(n), overlapList(m)%ie(n), &
+                  overlapList(m)%dir(n), overlapList(m)%rotation(n)
+          enddo
+       enddo
+       if(nsend >0) flush(iunit)
+    endif
+    if(nsend>0) then
+       if (associated(update%send)) deallocate(update%send)
+       allocate(update%send(nsend))
+       update%nsend = nsend
+       do m = 1, nsend
+          call add_update_overlap(update%send(m), overlapList(m))
+       enddo
+    endif
+    if(nsend_check>0) then
+       check%nsend = nsend_check
+       if (associated(check%send)) deallocate(check%send)
+       allocate(check%send(nsend_check))
+       do m = 1, nsend_check
+          call add_check_overlap(check%send(m), checkList(m))
+       enddo
+    endif
+    do m = 1,size(overlapList(:))
+       call deallocate_overlap_type(overlapList(m))
+    enddo
+    if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+       do m = 1,size(checkList(:))
+          call deallocate_overlap_type(checkList(m))
+       enddo
+    endif
+    nrecv = 0
+    nrecv_check = 0
+    do list = 0,nlist-1
+       m = mod( domain%pos+nlist-list, nlist )
+       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then
+          jsc = domain%list(m)%y(1)%compute%begin; jec = domain%list(m)%y(1)%compute%end+jshift
+          iec = ishift+domain%list(m)%x(1)%compute%end; isc = domain%list(m)%x(1)%compute%begin
+          if(isc == isg) &
+               isc = max(ifold, domain%x(tMe)%list(domain%list(m)%x(1)%pos)%memory%begin)
+
+          ! Receive into the northern halo.
+          dir = 7
+          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%compute%end+nhalo+jshift
+          ied = ishift+domain%x(tMe)%compute%end; isd = domain%x(tMe)%compute%begin
+          js = jsc; je = jec; ie = iec; is = isc
+          if( domain%symmetry .AND. (position == EAST .OR. position == CORNER ) &
+               .AND. ( ied == is .or. isd == ie ) ) then
+          else
+             if( isd == ifold .AND. (position == CORNER .OR. position == EAST) ) then
+                call fill_overlap_recv_fold_west(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                     dir, jshift, position, joff, middle)
+             else
+                call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                     dir, joff, domain%y(tMe)%cyclic)
+             endif
+          endif
+
+          ! Receive into the northeastern halo.
+          dir = 8
+          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%compute%end+nhalo+jshift
+          ied = ishift+domain%x(tMe)%compute%end+ehalo;    isd = ishift+domain%x(tMe)%compute%end+1
+          js = jsc; je = jec; ie = iec; is = isc
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+               joff, domain%y(tMe)%cyclic)
+          if(is2 .LE. ie2) call fill_overlap_recv_nofold_east(overlap, domain, m, is2, ie2, js, je, isd, ied, jsd, &
+               jed, jsg, jeg, dir, joff, domain%y(tMe)%cyclic)
+
+          ! Receive into the eastern halo.
+          dir = 1
+          jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
+          ied = ishift+domain%x(tMe)%compute%end+ehalo;    isd = ishift+domain%x(tMe)%compute%end+1
+          js = jsc; je = jec; ie = iec; is = isc
+          is2 = 0; ie2 = -1
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isd, ied, jsd, jed, dir, &
+               symmetry=domain%symmetry)
+          if(is2 .LE. ie2) call insert_update_overlap(overlap, domain%list(m)%pe, is2, ie2, js, je, isd, ied, jsd, &
+               jed, dir, symmetry=domain%symmetry)
+
+          ! Receive into the southeastern halo.
+          dir = 2
+          jsd = domain%y(tMe)%compute%begin-shalo; jed = domain%y(tMe)%compute%begin-1
+          ied = ishift+domain%x(tMe)%compute%end+ehalo; isd = ishift+domain%x(tMe)%compute%end+1
+          js = jsc; je = jec; ie = iec; is = isc
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          if( jed.LT.jsg )then
+             if( domain%y(tMe)%cyclic ) then
+                js = js-joff; je = je-joff
+             endif
+          else if (jsd.LT.jsg )then
+             if( domain%y(tMe)%cyclic ) then
+                js2 = js-joff; je2 = je-joff
+             endif
+          endif
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isd, ied, jsd, jed, dir)
+          if(je2 .GE. js2)call insert_update_overlap(overlap, domain%list(m)%pe, &
+               is, ie, js2, je2, isd, ied, jsd, jed, dir)
+          if(is2 .LE. ie2)call insert_update_overlap(overlap, domain%list(m)%pe, &
+               is2, ie2, js, je, isd, ied, jsd, jed, dir)
+          if(je2 .GE. js2 .AND. is2 .LE. ie2)call insert_update_overlap(overlap, domain%list(m)%pe, is2, ie2, js2, &
+               je2, isd, ied, jsd, jed, dir)
+
+          ! Receive into the southern halo.
+          dir = 3
+          jsd = domain%y(tMe)%compute%begin-shalo;    jed = domain%y(tMe)%compute%begin-1
+          ied = ishift+domain%x(tMe)%compute%end; isd = domain%x(tMe)%compute%begin
+          js = jsc; je = jec; ie = iec; is = isc
+          if( isd == ifold .AND. (position == CORNER .OR. position == EAST) ) then
+             call fill_overlap_recv_fold_west(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, symmetry=domain%symmetry)
+          endif
+
+          ! Receive into the southwestern halo.
+          dir = 4
+          folded = .false.
+          jsd = domain%y(tMe)%compute%begin-shalo;    jed = domain%y(tMe)%compute%begin-1
+          ied = domain%x(tMe)%compute%begin-1; isd = domain%x(tMe)%compute%begin-whalo
+          js = jsc; je = jec; ie = iec; is = isc
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          js3 = 0; je3 = -1; is3 = 0; ie3 = -1
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          if( ied .LT. ifold ) then
+             folded = .TRUE.
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+          else if( isd .LT. ifold )then
+             folded = .TRUE.
+             js2 = js; je2 = je; ie2 = ie; is2 = is
+             jsd2 = jsd; jed2 = jed; ied2 = ied; isd2 = ifold
+             ied = ifold-1
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+             if(jsd < jsg .and. jed .GE. jsg .and. domain%symmetry) then
+                jsd3 = jsd; jed3 = jsg-1
+                ied3 = ied; isd3 = isd
+                js3 = js-joff; je3 = je-joff
+                ie3 = ie; is3 = is
+                jsd = jsg;
+             endif
+          endif
+          if( ifold .LE. ie .AND. ifold .GE. is .AND. isd == ifold &
+               .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_recv_fold_west(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded)
+          endif
+          if(je3 .GE. js3) call fill_overlap_recv_nofold_east(overlap, domain, m, is3, ie3, js3, je3, isd3, ied3, &
+               jsd3, jed3, jsg, jeg, dir, joff, domain%y(tMe)%cyclic, folded)
+          if(je2 .GE. js2) then
+             if( ifold .LE. ie2 .AND. ifold .GE. is2 .AND. isd2 == ifold &
+                  .AND. (position == CORNER .OR. position == EAST)) then
+                call fill_overlap_recv_fold_west(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, jsg, &
+                     jeg, dir, jshift, position, joff, middle)
+             else
+                call fill_overlap_recv_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, &
+                     jsg, jeg, dir, joff, domain%y(tMe)%cyclic)
+             endif
+          endif
+          if(js .LT. jsg .AND. domain%y(tMe)%cyclic) then
+             js = js + joff
+             call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, js, isd, ied, jsd, jed, dir, folded)
+          endif
+
+          ! Receive into the western halo.
+          dir = 5
+          folded = .false.
+          jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
+          ied = domain%x(tMe)%compute%begin-1; isd = domain%x(tMe)%compute%begin-whalo
+          js = jsc; je = jec; ie = iec; is = isc
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          if( ied .LT. ifold ) then
+             folded = .TRUE.
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+          else if( isd .LT. ifold )then
+             folded = .TRUE.
+             js2 = js; je2 = je; ie2 = ie; is2 = is
+             jsd2 = jsd; jed2 = jed; ied2 = ied; isd2 = ifold
+             ied = ifold-1
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+          end if
+          if( ifold .LE. ie .AND. ifold .GE. is .AND. isd == ifold &
+               .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_recv_fold_west(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+                  jshift, position, joff, middle, symmetry=domain%symmetry)
+          else
+             call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded, symmetry=domain%symmetry)
+          endif
+          if(je2 .GE. js2) then
+             if(ifold .LE. ie2 .AND. ifold .GE. is2 .AND. isd2 == ifold &
+                  .AND. (position == CORNER .OR. position == EAST)) then
+                call fill_overlap_recv_fold_west(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, jsg, &
+                     jeg, dir, jshift, position, joff, middle, symmetry=domain%symmetry)
+             else
+                call fill_overlap_recv_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, &
+                     jsg, jeg, dir, joff, domain%y(tMe)%cyclic, folded, symmetry=domain%symmetry)
+             endif
+          endif
+
+          ! Fill redundant fold-line points in the upper tangential half.
+          if( (position == EAST .OR. position == CORNER) &
+               .AND. domain%y(tMe)%pos .GE. size(domain%y(tMe)%list(:))/2) then
+             if( isd .LE. ifold .AND. jed .GE. middle)then
+                ied = ifold; isd = ifold
+                js = jsc; je = jec; ie = iec; is = isc
+                jsd = max(jsd, middle)
+                select case (position)
+                case(EAST)
+                   j = js; js = jsg+jeg-je; je = jsg+jeg-j
+                case(CORNER)
+                   j = js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
+                end select
+                call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isd, ied, jsd, jed, dir, .true.)
+             endif
+             if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+                ied = domain%x(tMe)%compute%begin
+                if(ied == isg .AND. ism <= ifold) &
+                     ied = ifold
+                isd = ied
+                if(isd == ifold) then
+                   js = max(js, jsd); je = min(je, jed)
+                   ie = min(ie, ied); is = max(is, isd)
+                   if(je.GE.js .AND. is .LE. ie )then
+                      nrecv_check = nrecv_check+1
+                      if(nrecv_check > size(checkList(:)) ) then
+                         call expand_check_overlap_list(checkList, nlist)
+                      endif
+                      call allocate_check_overlap(checkList(nrecv_check), 1)
+                      call insert_check_overlap(checkList(nrecv_check), domain%list(m)%pe, tMe, 4, &
+                           ONE_HUNDRED_EIGHTY, is, ie, js, je)
+                   end if
+                end if
+             endif
+          endif
+
+          ! Receive into the northwestern halo.
+          dir = 6
+          folded = .false.
+          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%compute%end+nhalo+jshift
+          ied = domain%x(tMe)%compute%begin-1; isd = domain%x(tMe)%compute%begin-whalo
+          js = jsc; je = jec; ie = iec; is = isc
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          js3 = 0; je3 = -1; is3 = 0; ie3 = -1
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          if( ied .LT. ifold ) then
+             folded = .TRUE.
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+          else if( isd .LT. ifold )then
+             folded = .TRUE.
+             js2 = js; je2 = je; ie2 = ie; is2 = is
+             jsd2 = jsd; jed2 = jed; ied2 = ied; isd2 = ifold
+             ied = ifold-1
+             call get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+             if(jed > jeg .and. jsd .LE. jeg .and. domain%symmetry) then
+                jsd3 = jeg+1; jed3 = jed
+                ied3 = ied; isd3 = isd
+                js3 = js+joff; je3 = je+joff
+                ie3 = ie; is3 = is
+                jed = jeg;
+             endif
+          endif
+          if( ifold .LE. ie .AND. ifold .GE. is .AND. isd == ifold &
+               .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_recv_fold_west(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded)
+          endif
+          if(je3 .GE. js3) call fill_overlap_recv_nofold_east(overlap, domain, m, is3, ie3, js3, je3, isd3, ied3, &
+               jsd3, jed3, jsg, jeg, dir, joff, domain%y(tMe)%cyclic, folded)
+          if(je2 .GE. js2) then
+             if(ifold .LE. ie2 .AND. ifold .GE. is2 .AND. isd2 == ifold &
+                  .AND. (position == CORNER .OR. position == EAST)) then
+                call fill_overlap_recv_fold_west(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, jsg, &
+                     jeg, dir, jshift, position, joff, middle)
+             else
+                call fill_overlap_recv_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, &
+                     jsg, jeg, dir, joff, domain%y(tMe)%cyclic)
+             endif
+          endif
+       endif
+       if( overlap%count > 0) then
+          nrecv = nrecv + 1
+          if(nrecv > size(overlapList(:)) )then
+             call mpp_error(NOTE, &
+                  'mpp_domains_define.inc(compute_overlaps_fold_west): overlapList for recv js expanded')
+             call expand_update_overlap_list(overlapList, nlist)
+          endif
+          call add_update_overlap(overlapList(nrecv), overlap)
+          call init_overlap_type(overlap)
+       endif
+    enddo
+    if(debug_message_passing) then
+       iunit = mpp_pe() + 1000
+       do m =1,nrecv
+          write(iunit, *) "********from_pe = " ,overlapList(m)%pe, " count = ",overlapList(m)%count
+          do n = 1, overlapList(m)%count
+             write(iunit, *) overlapList(m)%js(n), overlapList(m)%je(n), overlapList(m)%is(n), overlapList(m)%ie(n), &
+                  overlapList(m)%dir(n), overlapList(m)%rotation(n)
+          enddo
+       enddo
+       if(nrecv >0) flush(iunit)
+    endif
+    if(nrecv>0) then
+       if (associated(update%recv)) deallocate(update%recv)
+       allocate(update%recv(nrecv))
+       update%nrecv = nrecv
+       do m = 1, nrecv
+          call add_update_overlap(update%recv(m), overlapList(m))
+          do n = 1, update%recv(m)%count
+             if(update%recv(m)%tileNbr(n) == domain%tile_id(tMe)) then
+                if(update%recv(m)%dir(n) == 7) domain%y(tMe)%loffset = 0
+                if(update%recv(m)%dir(n) == 1) domain%x(tMe)%loffset = 0
+             endif
+          enddo
+       enddo
+    endif
+    if(nrecv_check>0) then
+       check%nrecv = nrecv_check
+       if (associated(check%recv)) deallocate(check%recv)
+       allocate(check%recv(nrecv_check))
+       do m = 1, nrecv_check
+          call add_check_overlap(check%recv(m), checkList(m))
+       enddo
+    endif
+    call deallocate_overlap_type(overlap)
+    do m = 1,size(overlapList(:))
+       call deallocate_overlap_type(overlapList(m))
+    enddo
+    if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+       do m = 1,size(checkList(:))
+          call deallocate_overlap_type(checkList(m))
+       enddo
+    endif
+    deallocate(overlapList)
+    if(set_check) deallocate(checkList)
+    domain%initialized = .true.
   end subroutine compute_overlaps_fold_west
 
   !###############################################################################
   !> computes remote domain overlaps
   !! assumes only one in each direction
   !! will calculate the overlapping for T,E,C,N-cell separately.
+  !! Exchange the Northern normal/tangential axes, including stagger shifts.
+  !! The fold constant is 2*ieg+1 for CENTER/NORTH and 2*ieg for EAST/CORNER.
   !! here assume fold-east and y-cyclic boundary condition
-  subroutine compute_overlaps_fold_east( domain, position, ishift, jshift )
+  subroutine compute_overlaps_fold_east(domain, position, update, check, ishift, jshift, whalo, ehalo, shalo, nhalo)
     type(domain2D), intent(inout) :: domain
-    integer, intent(in)           :: position, ishift, jshift
-
+    type(overlapSpec), intent(inout), pointer :: update
+    type(overlapSpec), intent(inout), pointer :: check
+    integer, intent(in)           :: position, jshift, ishift
+    integer, intent(in)           :: shalo, nhalo, whalo, ehalo
     integer                          :: j, m, n, nlist, tMe, tNbr, dir
-    integer                          :: is, ie, js, je, isc, iec, jsc, jec, isd, ied, jsd
-    integer                          :: jed, isg, ieg, jsg, jeg, ioff, joff
-    integer                          :: list, middle, ni, nj, isgd, iegd, jsgd, jegd
-    integer                          :: ism, iem, jsm, jem, whalo, ehalo, shalo, nhalo
+    integer                          :: js, je, is, ie, jsc, jec, isc, iec, jsd, jed, isd, ied
+    integer                          :: jsg, jeg, isg, ieg, joff, ioff
+    integer                          :: list, middle, nj, ni
+    integer                          :: jsm, jem, ism, iem
+    integer                          :: js2, je2, is2, ie2
+    integer                          :: js3, je3, is3, ie3
+    integer                          :: jsd3, jed3, isd3, ied3
+    integer                          :: jsd2, jed2, isd2, ied2
     logical                          :: folded
     type(overlap_type)               :: overlap
-    type(overlapSpec),   pointer     :: update=>NULL()
-    type(overlap_type)               :: overlapList(MAXLIST)
-    type(overlap_type)               :: checkList(MAXLIST)
-    type(overlapSpec),   pointer     :: check =>NULL()
+    type(overlap_type),  pointer     :: overlapList(:)=>NULL()
+    type(overlap_type),  pointer     :: checkList(:)=>NULL()
     integer                          :: nsend, nrecv
     integer                          :: nsend_check, nrecv_check
-
-    !--- since we restrict that if multiple tiles on one pe, all the tiles are limited to this pe.
-    !--- In this case, if ntiles on this pe is greater than 1, no overlapping between processor within each tile
-    !--- In this case the overlapping exist only for tMe=1 and tNbr=1
-    if(size(domain%x(:)) > 1) return
-
-    !--- if there is no halo, no need to compute overlaps.
-    if(domain%whalo==0 .AND. domain%ehalo==0 .AND. domain%shalo==0 .AND. domain%nhalo==0) return
-
-    !--- when there is only one tile, n will equal to np
+    integer                          :: iunit
+    logical                          :: set_check
+    if(size(domain%y(:)) > 1) return
+    if(shalo==0 .AND. nhalo==0 .AND. whalo==0 .AND. ehalo==0) return
+    if(.NOT. domain%y(1)%cyclic) call mpp_error(FATAL, &
+         'compute_overlaps_fold_east: the tangential axis must be cyclic for '//trim(domain%name))
     nlist = size(domain%list(:))
-
-    select case(position)
-    case (CENTER)
-       update => domain%update_T
-    case (CORNER)
-       update => domain%update_C
-       check  => domain%check_C
-    case (EAST)
-       update => domain%update_E
-       check  => domain%check_E
-    case (NORTH)
-       update => domain%update_N
-       check  => domain%check_N
-    case default
-       call mpp_error(FATAL, "mpp_domains_define.inc(compute_overlaps_fold_east):"// &
-                           & " the value of position should be CENTER, EAST, CORNER or NORTH")
-    end select
-
-    !--- overlap is used to store the overlapping temporarily.
-    call allocate_update_overlap( overlap, MAXOVERLAP)
-
-    !send
-    call mpp_get_compute_domain( domain, isc, iec, jsc, jec, position=position )
-    call mpp_get_global_domain ( domain, isg, ieg, jsg, jeg, xsize=ni, ysize=nj, position=position ) !cyclic offsets
-    call mpp_get_memory_domain ( domain, ism, iem, jsm, jem, position=position )
-    update%xbegin = ism; update%xend = iem
+    set_check = .false.
+    if(ASSOCIATED(check)) set_check = .true.
+    allocate(overlapList(MAXLIST) )
+    if(set_check) allocate(checkList(MAXLIST)   )
+    call allocate_update_overlap(overlap, MAXOVERLAP)
+    call mpp_get_compute_domain(domain, isc, iec, jsc, jec, position=position)
+    call mpp_get_global_domain(domain, isg, ieg, jsg, jeg, ysize=nj, xsize=ni, position=position)
+    call mpp_get_memory_domain(domain, ism, iem, jsm, jem, position=position)
     update%ybegin = jsm; update%yend = jem
-    if(ASSOCIATED(check)) then
-       check%xbegin  = ism; check%xend  = iem
+    update%xbegin = ism; update%xend = iem
+    if(set_check) then
        check%ybegin  = jsm; check%yend  = jem
+       check%xbegin  = ism; check%xend  = iem
     endif
-    update%whalo  = domain%whalo; update%ehalo = domain%ehalo
-    update%shalo  = domain%shalo; update%nhalo = domain%nhalo
-    whalo         = domain%whalo; ehalo        = domain%ehalo
-    shalo         = domain%shalo; nhalo        = domain%nhalo
-
-    ioff = ni - ishift
+    update%shalo  = shalo; update%nhalo = nhalo
+    update%whalo  = whalo; update%ehalo = ehalo
     joff = nj - jshift
-    middle = (jsg+jeg)/2+1
+    ioff = ni - ishift
+    middle = jsg+(jeg-jsg)/2+1
     tMe = 1; tNbr = 1
-
-    if(.NOT. BTEST(domain%fold,EAST)) then
-       call mpp_error(FATAL, "mpp_domains_define.inc(compute_overlaps_fold_east): "//&
-            "boundary condition in y-direction should be folded-east for "//trim(domain%name))
+    update%nsend = 0; update%nrecv = 0
+    if(set_check) then
+       check%nsend = 0; check%nrecv = 0
     endif
-    if(.NOT. domain%y(tMe)%cyclic) then
-       call mpp_error(FATAL, "mpp_domains_define.inc(compute_overlaps_fold_east): "//&
-            "boundary condition in y-direction should be cyclic for "//trim(domain%name))
-    endif
-    if(.not. domain%symmetry) then
-       call mpp_error(FATAL, "mpp_domains_define.inc(compute_overlaps_fold_east): "//&
-            "when east boundary is folded, the domain must be symmetry for "//trim(domain%name))
-    endif
-
     nsend = 0
     nsend_check = 0
     do list = 0,nlist-1
        m = mod( domain%pos+list, nlist )
-       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then  ! only compute the overlapping within tile.
-          !to_pe's eastern halo
-          dir = 1
-          folded = .false.
-          is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
-          js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
-          if( ie.GT.ieg )then
-             folded = .true.
-             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
-          end if
-          !--- when domain symmetry and position is EAST or CORNER, the point when jsc == je,
-          !--- no need to send, because the data on that point will come from other pe.
-          !--- come from two pe ( there will be only one point on one pe. ).
-          if( (position == EAST .OR. position == CORNER ) .AND. ( jsc == je .or. jec == js ) ) then
-             !--- do nothing, this point will come from other pe
+       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then
+
+          ! To the peer's northern halo.
+          dir = 7
+          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
+          is = domain%list(m)%x(tNbr)%compute%begin; ie = domain%list(m)%x(tNbr)%compute%end+ishift
+          if( domain%symmetry .AND. (position == EAST .OR. position == CORNER ) &
+               .AND. ( isc == ie .or. iec == is ) ) then
           else
-             call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                         is, ie, js, je, isc, iec, jsc, jec, dir, folded, symmetry=domain%symmetry)
-          endif
-          !--- when east edge is folded, js .LT. jsg
-          if(js .LT. jsg) then
-             js = js + ioff
-             call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                         is, ie, js, js, isc, iec, jsc, jec, dir, folded)
-          endif
-
-          !to_pe's SE halo
-          dir = 2
-          folded = .FALSE.
-          is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
-          js = domain%list(m)%y(tNbr)%compute%begin-shalo;    je = domain%list(m)%y(tNbr)%compute%begin-1
-          if( jsg.GT.js .AND. je.LT.jsc )then !try cyclic offset
-             js = js+joff; je = je+joff
+             if( ie == ieg .AND. (position == CORNER .OR. position == EAST) ) then
+                call fill_overlap_send_fold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                     dir, jshift, position, joff, middle)
+             else
+                call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                     dir, joff, domain%y(tMe)%cyclic, symmetry=domain%symmetry)
+             endif
           end if
 
-          if( ie.GT.ieg )then
+          ! To the peer's northwestern halo.
+          dir = 6
+          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
+          is = domain%list(m)%x(tNbr)%compute%begin-whalo;  ie = domain%list(m)%x(tNbr)%compute%begin-1
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+               joff, domain%y(tMe)%cyclic)
+          if(ie2 .GE. is2) call fill_overlap_send_nofold_east(overlap, domain, m, is2, ie2, js, je, isc, iec, jsc, &
+               jec, jsg, jeg, dir, joff, domain%y(tMe)%cyclic)
+
+          ! To the peer's western halo.
+          dir = 5
+          js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
+          is = domain%list(m)%x(tNbr)%compute%begin-whalo; ie = domain%list(m)%x(tNbr)%compute%begin-1
+          is2 = 0; ie2 = -1
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isc, iec, jsc, jec, dir, &
+               symmetry=domain%symmetry)
+          if(ie2 .GE. is2) call insert_update_overlap(overlap, domain%list(m)%pe, is2, ie2, js, je, isc, iec, jsc, &
+               jec, dir, symmetry=domain%symmetry)
+
+          ! To the peer's southwestern halo.
+          dir = 4
+          js = domain%list(m)%y(tNbr)%compute%begin-shalo; je = domain%list(m)%y(tNbr)%compute%begin-1
+          is = domain%list(m)%x(tNbr)%compute%begin-whalo; ie = domain%list(m)%x(tNbr)%compute%begin-1
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+               joff, domain%y(tMe)%cyclic)
+          if(ie2 .GE. is2) call fill_overlap_send_nofold_east(overlap, domain, m, is2, ie2, js, je, isc, iec, jsc, &
+               jec, jsg, jeg, dir, joff, domain%y(tMe)%cyclic)
+
+          ! To the peer's southern halo.
+          dir = 3
+          js = domain%list(m)%y(tNbr)%compute%begin-shalo;    je = domain%list(m)%y(tNbr)%compute%begin-1
+          is = domain%list(m)%x(tNbr)%compute%begin; ie = domain%list(m)%x(tNbr)%compute%end+ishift
+          if( ie == ieg .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_send_fold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, symmetry=domain%symmetry)
+          end if
+
+          ! To the peer's southeastern halo.
+          dir = 2
+          js = domain%list(m)%y(tNbr)%compute%begin-shalo;  je = domain%list(m)%y(tNbr)%compute%begin-1
+          is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          js3 = 0; je3 = -1; is3 = 0; ie3 = -1
+          folded = .FALSE.
+          if(is .GT. ieg) then
              folded = .TRUE.
              call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
-          end if
-
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir, folded)
-          !--- when east edge is folded,
-          if(js .LT. jsg) then
-             js = js + joff
-             call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                         is, ie, js, js, isc, iec, jsc, jec, dir, folded)
-          endif
-
-          !to_pe's southern halo
-          dir = 3
-          is = domain%list(m)%x(tNbr)%compute%begin; ie = domain%list(m)%x(tNbr)%compute%end+ishift
-          js = domain%list(m)%y(tNbr)%compute%begin-shalo; je = domain%list(m)%y(tNbr)%compute%begin-1
-          !--- to make sure the consistence between pes
-          if( (position == EAST .OR. position == CORNER ) .AND. ( isc == ie .or. iec == is ) ) then
-             !--- do nothing, this point will come from other pe
-          else
-             if( js.LT.jsg .AND. jsc.GT.je) then ! cyclic offset
-                js = js+joff; je = je+joff
+          else if(ie .GT. ieg) then
+             folded = .TRUE.
+             js2 = js; je2 = je; is2 = is; ie2 = ieg
+             is  = ieg+1
+             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
+             if( js .GT. jeg) then
+                js = js - joff; je = je - joff
+             else if( je .GT. jeg ) then
+                js3 = js; je3 = jeg; is3 = is; ie3 = ie
+                js = jeg+1-joff; je = je - joff
              endif
-             !--- when the east face is folded, the south halo points at
-             !--- the position should be on CORNER or EAST
-             if( ie == ieg .AND. (position == CORNER .OR. position == EAST) &
-                  .AND. ( domain%list(m)%y(tNbr)%compute%begin == jsg .OR. &
-                        domain%list(m)%y(tNbr)%compute%begin-1 .GE. middle  ) ) then
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie-1, js, je, isc, iec, jsc, jec, dir)
-                !--- consider at i = ieg for east edge.
-                !--- when the data is at corner and not symmetry, j = jsg -1 will get from cyclic condition
-                if(position == CORNER .AND. .NOT. domain%symmetry .AND. domain%list(m)%y(tNbr)%compute%begin==jsg)then
-                   call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                              ie, ie, je, je, isc, iec, jsc, jec, dir, .true.)
-                end if
-
-                ie = domain%list(m)%x(tNbr)%compute%end+ishift; is = ie
-                js = domain%list(m)%y(tNbr)%compute%begin-shalo;  je = domain%list(m)%y(tNbr)%compute%begin-1
-                if ( domain%list(m)%y(tNbr)%compute%begin == jsg ) then
-                   select case (position)
-                   case(EAST)
-                      j=js; js = 2*jsg-je-1; je = 2*jsg-j-1
-                   case(CORNER)
-                      j=js; js = 2*jsg-je-2+2*jshift; je = 2*jsg-j-2+2*jshift
-                   end select
-                   if(je .GT. domain%y(tMe)%compute%end+jshift) call mpp_error( FATAL, &
-                        'mpp_domains_define.inc(compute_overlaps_fold_east: south edge ubound error send.' )
-                else
-                   select case (position)
-                   case(EAST)
-                      j=js; js = jsg+jeg-je; je = jsg+jeg-j
-                   case(CORNER)
-                      j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
-                   end select
-                end if
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
+          endif
+          ! Match the receive-side order: unwrapped piece before cyclic piece.
+          if(je3 .GE. js3) call fill_overlap_send_nofold_east(overlap, domain, m, is3, ie3, js3, je3, isc, iec, jsc, &
+               jec, jsg, jeg, dir, joff, domain%y(tMe)%cyclic, folded)
+          if( ie == ieg .AND. iec == ieg .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_send_fold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded)
+          endif
+          if(je2 .GE. js2) then
+             if(ie2 == ieg .AND. iec == ieg.AND.(position == CORNER .OR. position == EAST))then
+                call fill_overlap_send_fold_east(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, jshift, position, joff, middle)
              else
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, symmetry=domain%symmetry)
-             end if
+                call fill_overlap_send_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, joff, domain%y(tMe)%cyclic)
+             endif
           endif
 
-          !to_pe's SW halo
-          dir = 4
-          is = domain%list(m)%x(tNbr)%compute%begin-whalo; ie = domain%list(m)%x(tNbr)%compute%begin-1
-          js = domain%list(m)%y(tNbr)%compute%begin-shalo; je = domain%list(m)%y(tNbr)%compute%begin-1
-          if( js.LT.jsg .AND. jsc.GT.je )then ! cyclic is assumed
-             js = js+joff; je = je+joff
-          end if
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir)
-
-          !to_pe's western halo
-          dir = 5
-          is = domain%list(m)%x(tNbr)%compute%begin-whalo;    ie = domain%list(m)%x(tNbr)%compute%begin-1
-          js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir, symmetry=domain%symmetry)
-
-          !to_pe's NW halo
-          dir = 6
-          is = domain%list(m)%x(tNbr)%compute%begin-whalo;    ie = domain%list(m)%x(tNbr)%compute%begin-1
-          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
-          if( je.GT.jeg .AND. jec.LT.js )then !cyclic offset
-             js = js-joff; je = je-joff
-          end if
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir)
-
-          !to_pe's northern halo
-          dir = 7
+          ! To the peer's eastern halo.
+          dir = 1
           folded = .FALSE.
-          is = domain%list(m)%x(tNbr)%compute%begin; ie = domain%list(m)%x(tNbr)%compute%end+ishift
-          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
-          !--- to make sure the consistence between pes
-          if( (position == EAST .OR. position == CORNER ) .AND. ( isc == ie .or. iec == is ) ) then
-             !--- do nothing, this point will come from other pe
+          js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
+          is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          if( is .GT. ieg) then
+             folded = .TRUE.
+             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
+          else if( ie.GT.ieg )then
+             folded = .TRUE.
+             js2 = js; je2 = je; is2 = is; ie2 = ieg
+             is  = ieg+1;
+             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
+          end if
+          if( ie == ieg .AND. iec == ieg .AND.(position == CORNER .OR. position == EAST))then
+             call fill_overlap_send_fold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+                  jshift, position, joff, middle, domain%symmetry)
           else
-             if( je.GT.jeg .AND. jec.LT.js) then ! cyclic offset
-                js = js-joff; je = je-joff
+             call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded, domain%symmetry)
+          endif
+          if(je2 .GE. js2) then
+             if(ie2 == ieg .AND. iec == ieg .AND.(position == CORNER .OR. position == EAST))then
+                call fill_overlap_send_fold_east(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, jshift, position, joff, middle, domain%symmetry)
+             else
+                call fill_overlap_send_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, joff, domain%y(tMe)%cyclic, symmetry=domain%symmetry)
              endif
-             !--- when the east face is folded, the north halo points at
-             !--- the position should be on CORNER or EAST
-             if( ie == ieg .AND. (position == CORNER .OR. position == EAST) &
-                  .AND. ( js .GE. middle .AND. domain%list(m)%y(tNbr)%compute%end+nhalo+jshift .LE. jeg ) ) then
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie-1, js, je, isc, iec, jsc, jec, dir)
-                ie = domain%list(m)%x(tNbr)%compute%end+ishift; is = ie
-                js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
+          endif
+
+          ! The lower tangential half owns the redundant fold-line points.
+          if( (position == EAST .OR. position == CORNER)  .AND. &
+               domain%y(tMe)%pos .LT. (size(domain%y(tMe)%list(:))+1)/2 ) then
+             if( domain%list(m)%x(tNbr)%compute%end+ehalo+ishift .GE. ieg .AND. jsc .LE. middle)then
+                is = ieg; ie = ieg
+                js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
+                js = max(js, middle)
                 select case (position)
                 case(EAST)
                    j=js; js = jsg+jeg-je; je = jsg+jeg-j
                 case(CORNER)
                    j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
                 end select
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
-             else
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isc, iec, jsc, jec, dir, symmetry=domain%symmetry)
-             end if
-          endif
-
-          !to_pe's NE halo
-          dir = 8
-          folded = .false.
-          is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
-          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
-          if( je.GT.jeg .AND. jec.LT.js )then ! cyclic offset
-             js = js-joff; je = je-joff
-          end if
-          if( ie.GT.ieg )then
-             folded = .TRUE.
-             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
-          end if
-
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isc, iec, jsc, jec, dir, folded)
-
-          !--- Now calculate the overlapping for fold-edge.
-          !--- only position at EAST and CORNER need to be considered
-          if( ( position == EAST .OR. position == CORNER) ) then
-            !fold is within domain
-             if( domain%x(tMe)%domain_data%begin .LE. ieg .AND. ieg .LE. domain%x(tMe)%domain_data%end+ishift )then
-                dir = 1
-                !--- calculate the overlapping for sending
-                if( domain%y(tMe)%pos .LT. (size(domain%y(tMe)%list(:))+1)/2 )then
-                   ie = domain%list(m)%x(tNbr)%compute%end+ishift;   is = ie
-                   if( ie == ieg )then   ! fold is within domain.
-                      js = domain%list(m)%y(tNbr)%compute%begin; je = domain%list(m)%y(tNbr)%compute%end+jshift
-                      select case (position)
-                      case(EAST)
-                         js = max(js, middle)
-                         j=js; js = jsg+jeg-je; je = jsg+jeg-j
-                      case(CORNER)
-                         js = max(js, middle)
-                         j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
-                      end select
-                      call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                                 is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
-                      is = max(is, isc); ie = min(ie, iec)
-                      js = max(js, jsc); je = min(je, jec)
-                      if(debug_update_level .NE. NO_CHECK .AND. ie.GE.is .AND. je.GE.js )then
-                         nsend_check = nsend_check+1
-                         call allocate_check_overlap(checkList(nsend_check), 1)
-                         call insert_check_overlap(checkList(nsend_check), domain%list(m)%pe, &
-                                                   tMe, 1, ONE_HUNDRED_EIGHTY, is, ie, js, je)
-                      end if
+                call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isc, iec, jsc, jec, dir, .true.)
+             endif
+             if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+                ie = domain%list(m)%x(tNbr)%compute%end+ishift;
+                if(ie == ieg) then
+                   js = max(js, jsc); je = min(je, jec)
+                   is = max(is, isc); ie = min(ie, iec)
+                   if(je.GE.js .AND. ie.GE.is )then
+                      nsend_check = nsend_check+1
+                      if(nsend_check > size(checkList(:)) ) then
+                         call expand_check_overlap_list(checkList, nlist)
+                      endif
+                      call allocate_check_overlap(checkList(nsend_check), 1)
+                      call insert_check_overlap(checkList(nsend_check), domain%list(m)%pe, tMe, 4, &
+                           ONE_HUNDRED_EIGHTY, is, ie, js, je)
                    end if
                 end if
-             end if
-          end if
-       end if
-       !--- copy the overlapping information
-       if( overlap%count > 0) then
-         nsend = nsend + 1
-         if(nsend > MAXLIST) call mpp_error(FATAL,  &
-             "mpp_domains_define.inc(compute_overlaps_east): nsend is greater than MAXLIST, increase MAXLIST")
-         call add_update_overlap(overlapList(nsend), overlap)
-         call init_overlap_type(overlap)
-       endif
-    end do  ! end of send set up.
+             endif
+          endif
 
-    ! copy the overlapping information into domain data structure
+          ! To the peer's northeastern halo.
+          dir = 8
+          js = domain%list(m)%y(tNbr)%compute%end+1+jshift; je = domain%list(m)%y(tNbr)%compute%end+nhalo+jshift
+          is = domain%list(m)%x(tNbr)%compute%end+1+ishift; ie = domain%list(m)%x(tNbr)%compute%end+ehalo+ishift
+          js2 = 0; je2=-1; is2=0; ie2=-1
+          js3 = 0; je3 = -1; is3 = 0; ie3 = -1
+          folded = .FALSE.
+          if(is .GT. ieg) then
+             folded = .TRUE.
+             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
+          else if(ie .GT. ieg) then
+             folded = .TRUE.
+             js2 = js; je2 = je; is2 = is; ie2 = ieg
+             is  = ieg+1
+             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
+             if( je .LT. jsg )then
+                js = js+joff; je = je+joff
+             else if( js .LT. jsg) then
+                js3 = jsg; je3 = je; is3 = is; ie3 = ie
+                js = js+joff; je = jsg-1+joff;
+             endif
+          endif
+          if(je3 .GE. js3) call fill_overlap_send_nofold_east(overlap, domain, m, is3, ie3, js3, je3, isc, iec, jsc, &
+               jec, jsg, jeg, dir, joff, domain%y(tMe)%cyclic, folded)
+          if( ie == ieg .AND. iec == ieg .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_send_fold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded)
+          endif
+          if(je2 .GE. js2) then
+             if(ie2 == ieg .AND. iec == ieg .AND.(position == CORNER .OR. position == EAST))then
+                call fill_overlap_send_fold_east(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, jshift, position, joff, middle)
+             else
+                call fill_overlap_send_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isc, iec, jsc, jec, jsg, &
+                     jeg, dir, joff, domain%y(tMe)%cyclic)
+             endif
+          endif
+       endif
+       if( overlap%count > 0) then
+          nsend = nsend + 1
+          if(nsend > size(overlapList(:)) ) then
+             call mpp_error(NOTE, &
+                  'mpp_domains_define.inc(compute_overlaps_fold_east): overlapList for send js expanded')
+             call expand_update_overlap_list(overlapList, nlist)
+          endif
+          call add_update_overlap(overlapList(nsend), overlap)
+          call init_overlap_type(overlap)
+       endif
+    end do
+    if(debug_message_passing) then
+       iunit = mpp_pe() + 1000
+       do m =1,nsend
+          write(iunit, *) "********to_pe = " ,overlapList(m)%pe, " count = ",overlapList(m)%count
+          do n = 1, overlapList(m)%count
+             write(iunit, *) overlapList(m)%js(n), overlapList(m)%je(n), overlapList(m)%is(n), overlapList(m)%ie(n), &
+                  overlapList(m)%dir(n), overlapList(m)%rotation(n)
+          enddo
+       enddo
+       if(nsend >0) flush(iunit)
+    endif
     if(nsend>0) then
-       update%nsend = nsend
-       if (associated(update%send)) deallocate(update%send) !< Check if associated
+       if (associated(update%send)) deallocate(update%send)
        allocate(update%send(nsend))
+       update%nsend = nsend
        do m = 1, nsend
-          call add_update_overlap( update%send(m), overlapList(m) )
+          call add_update_overlap(update%send(m), overlapList(m))
        enddo
     endif
-
-   if(nsend_check>0) then
+    if(nsend_check>0) then
        check%nsend = nsend_check
-       if (associated(check%send)) deallocate(check%send) !< Check if associated
+       if (associated(check%send)) deallocate(check%send)
        allocate(check%send(nsend_check))
        do m = 1, nsend_check
-          call add_check_overlap( check%send(m), checkList(m) )
+          call add_check_overlap(check%send(m), checkList(m))
        enddo
     endif
-
-    do m = 1, MAXLIST
+    do m = 1,size(overlapList(:))
        call deallocate_overlap_type(overlapList(m))
-       if(debug_update_level .NE. NO_CHECK) call deallocate_overlap_type(checkList(m))
     enddo
-
-    isgd = isg - domain%whalo
-    iegd = ieg + domain%ehalo
-    jsgd = jsg - domain%shalo
-    jegd = jeg + domain%nhalo
-
-    ! begin setting up recv
+    if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+       do m = 1,size(checkList(:))
+          call deallocate_overlap_type(checkList(m))
+       enddo
+    endif
     nrecv = 0
     nrecv_check = 0
     do list = 0,nlist-1
        m = mod( domain%pos+nlist-list, nlist )
-       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then  ! only compute the overlapping within tile.
-          isc = domain%list(m)%x(1)%compute%begin; iec = domain%list(m)%x(1)%compute%end+ishift
+       if(domain%list(m)%tile_id(tNbr) == domain%tile_id(tMe) ) then
           jsc = domain%list(m)%y(1)%compute%begin; jec = domain%list(m)%y(1)%compute%end+jshift
-          !recv_e
-          dir = 1
-          folded = .false.
-          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%domain_data%end+ishift
-          jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if( ied.GT.ieg )then
-             folded = .true.
-             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
-          end if
-          if( (position == EAST .OR. position == CORNER ) .AND. (jsd == je .or. jed == js ) ) then
-             !--- do nothing, this point will come from other pe
+          isc = domain%list(m)%x(1)%compute%begin; iec = domain%list(m)%x(1)%compute%end+ishift
+
+          ! Receive into the northern halo.
+          dir = 7
+          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%compute%end+nhalo+jshift
+          isd = domain%x(tMe)%compute%begin; ied = domain%x(tMe)%compute%end+ishift
+          js=jsc; je=jec; is=isc; ie=iec
+          if( domain%symmetry .AND. (position == EAST .OR. position == CORNER ) &
+               .AND. ( isd == ie .or. ied == is ) ) then
           else
-             call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                        is, ie, js, je, isd, ied, jsd, jed, dir, folded, symmetry=domain%symmetry)
-          end if
-          !--- when west edge is folded, js will be less than jsg when position is EAST and CORNER
-          if(js .LT. jsg ) then
-             js = js + joff
-             call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                        is, ie, js, js, isd, ied, jsd, jed, dir, folded)
+             if( ied == ieg .AND. (position == CORNER .OR. position == EAST) ) then
+                call fill_overlap_recv_fold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                     dir, jshift, position, joff, middle)
+             else
+                call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                     dir, joff, domain%y(tMe)%cyclic)
+             endif
           endif
 
-          !recv_se
+          ! Receive into the northwestern halo.
+          dir = 6
+          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%compute%end+nhalo+jshift
+          isd = domain%x(tMe)%compute%begin-whalo;    ied = domain%x(tMe)%compute%begin-1
+          js=jsc; je=jec; is=isc; ie=iec
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+               joff, domain%y(tMe)%cyclic)
+          if(ie2 .GE. is2) call fill_overlap_recv_nofold_east(overlap, domain, m, is2, ie2, js, je, isd, ied, jsd, &
+               jed, jsg, jeg, dir, joff, domain%y(tMe)%cyclic)
+
+          ! Receive into the western halo.
+          dir = 5
+          jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
+          isd = domain%x(tMe)%compute%begin-whalo;    ied = domain%x(tMe)%compute%begin-1
+          js=jsc; je=jec; is=isc; ie=iec
+          is2 = 0; ie2 = -1
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isd, ied, jsd, jed, dir, &
+               symmetry=domain%symmetry)
+          if(ie2 .GE. is2) call insert_update_overlap(overlap, domain%list(m)%pe, is2, ie2, js, je, isd, ied, jsd, &
+               jed, dir, symmetry=domain%symmetry)
+
+          ! Receive into the southwestern halo.
+          dir = 4
+          jsd = domain%y(tMe)%compute%begin-shalo; jed = domain%y(tMe)%compute%begin-1
+          isd = domain%x(tMe)%compute%begin-whalo; ied = domain%x(tMe)%compute%begin-1
+          js=jsc; je=jec; is=isc; ie=iec
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          if( jed.LT.jsg )then
+             if( domain%y(tMe)%cyclic ) then
+                js = js-joff; je = je-joff
+             endif
+          else if (jsd.LT.jsg )then
+             if( domain%y(tMe)%cyclic ) then
+                js2 = js-joff; je2 = je-joff
+             endif
+          endif
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isd, ied, jsd, jed, dir)
+          if(je2 .GE. js2)call insert_update_overlap(overlap, domain%list(m)%pe, &
+               is, ie, js2, je2, isd, ied, jsd, jed, dir)
+          if(ie2 .GE. is2)call insert_update_overlap(overlap, domain%list(m)%pe, &
+               is2, ie2, js, je, isd, ied, jsd, jed, dir)
+          if(je2 .GE. js2 .AND. ie2 .GE. is2)call insert_update_overlap(overlap, domain%list(m)%pe, is2, ie2, js2, &
+               je2, isd, ied, jsd, jed, dir)
+
+          ! Receive into the southern halo.
+          dir = 3
+          jsd = domain%y(tMe)%compute%begin-shalo;    jed = domain%y(tMe)%compute%begin-1
+          isd = domain%x(tMe)%compute%begin; ied = domain%x(tMe)%compute%end+ishift
+          js=jsc; je=jec; is=isc; ie=iec
+          if( ied == ieg .AND. (position == CORNER .OR. position == EAST) ) then
+             call fill_overlap_recv_fold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, symmetry=domain%symmetry)
+          endif
+
+          ! Receive into the southeastern halo.
           dir = 2
           folded = .false.
-          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%domain_data%end+ishift
-          jsd = domain%y(tMe)%domain_data%begin;    jed = domain%y(tMe)%compute%begin-1
-          is=isc; ie=iec; js=jsc; je=jec
-          if( ied.GT.ieg )then
-             folded = .true.
+          jsd = domain%y(tMe)%compute%begin-shalo;    jed = domain%y(tMe)%compute%begin-1
+          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%compute%end+ehalo+ishift
+          js=jsc; je=jec; is=isc; ie=iec
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          js3 = 0; je3 = -1; is3 = 0; ie3 = -1
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          if( isd .GT. ieg ) then
+             folded = .TRUE.
+             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
+          else if( ied.GT.ieg )then
+             folded = .TRUE.
+             js2 = js; je2 = je; is2 = is; ie2 = ie
+             jsd2 = jsd; jed2 = jed; isd2 = isd; ied2 = ieg
+             isd = ieg+1
+             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
+             if(jsd < jsg .and. jed .GE. jsg .and. domain%symmetry) then
+                jsd3 = jsd; jed3 = jsg-1
+                isd3 = isd; ied3 = ied
+                js3 = js-joff; je3=je-joff
+                is3 = is; ie3 = ie
+                jsd = jsg;
+             endif
+          endif
+          if( ieg .GE. is .AND. ieg .LE. ie .AND. ied == ieg  .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_recv_fold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded)
+          endif
+          if(je3 .GE. js3) call fill_overlap_recv_nofold_east(overlap, domain, m, is3, ie3, js3, je3, isd3, ied3, &
+               jsd3, jed3, jsg, jeg, dir, joff, domain%y(tMe)%cyclic, folded)
+          if(je2 .GE. js2) then
+             if( ieg .GE. is2 .AND. ieg .LE. ie2 .AND. ied2 == ieg &
+                  .AND. (position == CORNER .OR. position == EAST)) then
+                call fill_overlap_recv_fold_east(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, jsg, &
+                     jeg, dir, jshift, position, joff, middle)
+             else
+                call fill_overlap_recv_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, &
+                     jsg, jeg, dir, joff, domain%y(tMe)%cyclic)
+             endif
+          endif
+          if(js .LT. jsg .AND. domain%y(tMe)%cyclic) then
+             js = js + joff
+             call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, js, isd, ied, jsd, jed, dir, folded)
+          endif
+
+          ! Receive into the eastern halo.
+          dir = 1
+          folded = .false.
+          jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
+          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%compute%end+ehalo+ishift
+          js=jsc; je=jec; is=isc; ie=iec
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          if( isd .GT. ieg ) then
+             folded = .TRUE.
+             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
+          else if( ied.GT.ieg )then
+             folded = .TRUE.
+             js2 = js; je2 = je; is2 = is; ie2 = ie
+             jsd2 = jsd; jed2 = jed; isd2 = isd; ied2 = ieg
+             isd = ieg+1
              call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
           end if
-          if( jsd.LT.jsg .AND. js.GT.jed ) then ! cyclic offset
-             js = js-joff; je = je-joff
-          end if
-          call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                     is, ie, js, je, isd, ied, jsd, jed, dir, folded)
-          !--- when west edge is folded, js will be less than jsg when position is EAST and CORNER
-          if(js .LT. jsg ) then
-             js = js + joff
-             call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                        is, ie, js, js, isd, ied, jsd, jed, dir, folded )
-          endif
-
-          !recv_s
-          dir = 3
-          folded = .false.
-          isd = domain%x(tMe)%compute%begin; ied = domain%x(tMe)%compute%end+ishift
-          jsd = domain%y(tMe)%domain_data%begin;    jed = domain%y(tMe)%compute%begin-1
-          is=isc; ie=iec; js=jsc; je=jec
-
-          if( (position == EAST .OR. position == CORNER ) .AND. ( isd == ie .or. ied == is ) ) then
-             !--- do nothing, this point will come from other pe
+          if( ieg .GE. is .AND. ieg .LE. ie .AND. ied == ieg  .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_recv_fold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+                  jshift, position, joff, middle, symmetry=domain%symmetry)
           else
-             if( jsd.LT.jsg .AND. js .GT. jed)then
-                js = js-joff; je = je-joff
-             end if
-             !--- when the east face is folded, the south halo points at
-             !--- the position should be on CORNER or EAST
-             if( ied == ieg .AND. (position == CORNER .OR. position == EAST) &
-                  .AND. ( jsd < jsg .OR. jed .GE. middle ) ) then
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd, ied-1, jsd, jed, dir)
-                is=isc; ie=iec; js=jsc; je=jec
-                if(jsd<jsg) then
-                   select case (position)
-                   case(EAST)
-                      j=js; js = 2*jsg-je-1; je = 2*jsg-j-1
-                   case(CORNER)
-                      j=js; js = 2*jsg-je-2+2*jshift; je = 2*jsg-j-2+2*jshift
-                   end select
-                   if(je .GT. domain%y(tMe)%compute%end+jshift) call mpp_error( FATAL, &
-                        'mpp_domains_define.inc(compute_overlaps_fold_west: south edge ubound error recv.' )
-                else
-                   select case (position)
-                   case(EAST)
-                      j=js; js = jsg+jeg-je; je = jsg+jeg-j
-                   case(CORNER)
-                      j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
-                   end select
-                end if
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, ied, ied, jsd, jed, dir, .true.)
+             call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded, symmetry=domain%symmetry)
+          endif
+          if(je2 .GE. js2) then
+             if(ieg .GE. is2 .AND. ieg .LE. ie2 .AND. ied2 == ieg .AND. &
+                (position == CORNER .OR. position == EAST)) then
+                call fill_overlap_recv_fold_east(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, jsg, &
+                     jeg, dir, jshift, position, joff, middle, symmetry=domain%symmetry)
              else
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd, ied, jsd, jed, dir, symmetry=domain%symmetry)
-             end if
+                call fill_overlap_recv_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, &
+                     jsg, jeg, dir, joff, domain%y(tMe)%cyclic, folded, symmetry=domain%symmetry)
+             endif
           endif
 
-          !recv_sw
-          dir = 4
-          isd = domain%x(tMe)%domain_data%begin; ied = domain%x(tMe)%compute%begin-1
-          jsd = domain%y(tMe)%domain_data%begin; jed = domain%y(tMe)%compute%begin-1
-          is=isc; ie=iec; js=jsc; je=jec
-          if( jsd.LT.jsg .AND. js.GE.jed )then ! cyclic is assumed
-             js = js-joff; je = je-joff
-          end if
-          call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                     is, ie, js, je, isd, ied, jsd, jed, dir)
-
-          !recv_w
-          dir = 5
-          isd = domain%x(tMe)%domain_data%begin;    ied = domain%x(tMe)%compute%begin-1
-          jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isd, ied, jsd, jed, dir, symmetry=domain%symmetry)
-
-          !recv_nw
-          dir = 6
-          folded = .false.
-          isd = domain%x(tMe)%domain_data%begin;    ied = domain%x(tMe)%compute%begin-1
-          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%domain_data%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if(  jed.GT.jeg .AND. je.LT.jsd )then ! cyclic offset
-             js = js+joff; je = je+joff
-          end if
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isd, ied, jsd, jed, dir)
-
-          !recv_n
-          dir = 7
-          folded = .false.
-          isd = domain%x(tMe)%compute%begin; ied = domain%x(tMe)%compute%end+ishift
-          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%domain_data%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if( (position == EAST .OR. position == CORNER ) .AND. ( isd == ie .or. ied == is ) ) then
-             !--- do nothing, this point will come from other pe
-          else
-             if( jed.GT.jeg .AND. je.LT.jsd)then
-                js = js+joff; je = je+joff
-             end if
-             !--- when the east face is folded, the south halo points at
-             !--- the position should be on CORNER or EAST
-             if( ied == ieg .AND. (position == CORNER .OR. position == EAST) &
-                  .AND. jsd .GE. middle .AND. jed .LE. jeg ) then
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd, ied-1, jsd, jed, dir)
-                is=isc; ie=iec; js=jsc; je=jec
+          ! Fill redundant fold-line points in the upper tangential half.
+          if( (position == EAST .OR. position == CORNER) &
+               .AND. domain%y(tMe)%pos .GE. size(domain%y(tMe)%list(:))/2) then
+             if( ied .GE. ieg .AND. jed .GE. middle)then
+                isd = ieg; ied = ieg
+                js=jsc; je=jec; is = isc; ie = iec
+                jsd = max(jsd, middle)
                 select case (position)
                 case(EAST)
                    j=js; js = jsg+jeg-je; je = jsg+jeg-j
                 case(CORNER)
                    j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
                 end select
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, ied, ied, jsd, jed, dir, .true.)
-             else
-                call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                            is, ie, js, je, isd, ied, jsd, jed, dir, symmetry=domain%symmetry)
-             end if
+                call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isd, ied, jsd, jed, dir, .true.)
+             endif
+             if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+                isd = domain%x(tMe)%compute%end+ishift;   ied = isd
+                if(ied == ieg) then
+                   js = max(js, jsd); je = min(je, jed)
+                   is = max(is, isd); ie = min(ie, ied)
+                   if(je.GE.js .AND. ie.GE.is )then
+                      nrecv_check = nrecv_check+1
+                      if(nrecv_check > size(checkList(:)) ) then
+                         call expand_check_overlap_list(checkList, nlist)
+                      endif
+                      call allocate_check_overlap(checkList(nrecv_check), 1)
+                      call insert_check_overlap(checkList(nrecv_check), domain%list(m)%pe, tMe, 4, &
+                           ONE_HUNDRED_EIGHTY, is, ie, js, je)
+                   end if
+                end if
+             endif
           endif
 
-          !recv_ne
+          ! Receive into the northeastern halo.
           dir = 8
           folded = .false.
-          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%domain_data%end+ishift
-          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%domain_data%end+jshift
-          is=isc; ie=iec; js=jsc; je=jec
-          if( ied.GT.ieg) then
-             folded = .true.
+          jsd = domain%y(tMe)%compute%end+1+jshift; jed = domain%y(tMe)%compute%end+nhalo+jshift
+          isd = domain%x(tMe)%compute%end+1+ishift; ied = domain%x(tMe)%compute%end+ehalo+ishift
+          js=jsc; je=jec; is=isc; ie=iec
+          js2 = 0; je2=-1; is2=0; ie2=-1
+          js3 = 0; je3 = -1; is3 = 0; ie3 = -1
+          js2 = 0; je2 = -1; is2 = 0; ie2 = -1
+          if( isd .GT. ieg ) then
+             folded = .TRUE.
              call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
-          end if
-          if( jed.GT.jeg .AND. je.LT.jsd )then !cyclic offset
-             js = js+joff; je = je+joff
+          else if( ied.GT.ieg )then
+             folded = .TRUE.
+             js2 = js; je2 = je; is2 = is; ie2 = ie
+             jsd2 = jsd; jed2 = jed; isd2 = isd; ied2 = ieg
+             isd = ieg+1
+             call get_fold_index_east(jsg, jeg, ieg, jshift, position, is, ie, js, je)
+             if(jed > jeg .and. jsd .LE. jeg .and. domain%symmetry) then
+                jsd3 = jeg+1; jed3 = jed
+                isd3 = isd; ied3 = ied
+                js3 = js+joff; je3=je+joff
+                is3 = is; ie3 = ie
+                jed = jeg;
+             endif
           endif
-
-          call insert_update_overlap( overlap, domain%list(m)%pe, &
-                                      is, ie, js, je, isd, ied, jsd, jed, dir)
-          !--- Now calculate the overlapping for fold-edge.
-          !--- for folded-south-edge, only need to consider to_pe's south(3) direction
-          !--- only position at EAST and CORNER need to be considered
-          if( ( position == EAST .OR. position == CORNER) ) then
-            !fold is within domain
-             if( domain%x(tMe)%domain_data%begin .LE. ieg .AND. ieg .LE. domain%x(tMe)%domain_data%end+ishift )then
-                dir = 1
-                !--- calculating overlapping for receving on north
-                if( domain%y(tMe)%pos .GE. size(domain%y(tMe)%list(:))/2 )then
-                   ied = domain%x(tMe)%compute%end+ishift;   isd = ied
-                   if( ied == ieg )then   ! fold is within domain.
-                      jsd = domain%y(tMe)%compute%begin; jed = domain%y(tMe)%compute%end+jshift
-                      is=isc; ie=iec; js = jsc; je = jec
-                      select case (position)
-                      case(EAST)
-                         jsd = max(jsd, middle)
-                         j=js; js = jsg+jeg-je; je = jsg+jeg-j
-                      case(CORNER)
-                         jsd = max(jsd, middle)
-                         j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
-                      end select
-                      call insert_update_overlap(overlap, domain%list(m)%pe, &
-                                                 is, ie, js, je, isd, ied, jsd, jed, dir, .TRUE.)
-                      is = max(is, isd); ie = min(ie, ied)
-                      js = max(js, jsd); je = min(je, jed)
-                      if(debug_update_level .NE. NO_CHECK .AND. ie.GE.is .AND. je.GE.js )then
-                         nrecv_check = nrecv_check+1
-                         call allocate_check_overlap(checkList(nrecv_check), 1)
-                         call insert_check_overlap(checkList(nrecv_check), domain%list(m)%pe, &
-                                                   tMe, 3, ONE_HUNDRED_EIGHTY, is, ie, js, je)
-                      endif
-                   endif
-                endif
+          if( ieg .GE. is .AND. ieg .LE. ie .AND. ied == ieg  .AND. (position == CORNER .OR. position == EAST)) then
+             call fill_overlap_recv_fold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+                  jshift, position, joff, middle)
+          else
+             call fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, &
+                  dir, joff, domain%y(tMe)%cyclic, folded)
+          endif
+          if(je3 .GE. js3) call fill_overlap_recv_nofold_east(overlap, domain, m, is3, ie3, js3, je3, isd3, ied3, &
+               jsd3, jed3, jsg, jeg, dir, joff, domain%y(tMe)%cyclic, folded)
+          if(je2 .GE. js2) then
+             if(ieg .GE. is2 .AND. ieg .LE. ie2 .AND. ied2 == ieg .AND. &
+                (position == CORNER .OR. position == EAST)) then
+                call fill_overlap_recv_fold_east(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, jsg, &
+                     jeg, dir, jshift, position, joff, middle)
+             else
+                call fill_overlap_recv_nofold_east(overlap, domain, m, is2, ie2, js2, je2, isd2, ied2, jsd2, jed2, &
+                     jsg, jeg, dir, joff, domain%y(tMe)%cyclic)
              endif
           endif
        endif
-       !--- copy the overlapping information
        if( overlap%count > 0) then
           nrecv = nrecv + 1
-         if(nrecv > MAXLIST) call mpp_error(FATAL,  &
-             "mpp_domains_define.inc(compute_overlaps_east): nrecv is greater than MAXLIST, increase MAXLIST")
-          call add_update_overlap( overlapList(nrecv), overlap)
+          if(nrecv > size(overlapList(:)) )then
+             call mpp_error(NOTE, &
+                  'mpp_domains_define.inc(compute_overlaps_fold_east): overlapList for recv js expanded')
+             call expand_update_overlap_list(overlapList, nlist)
+          endif
+          call add_update_overlap(overlapList(nrecv), overlap)
           call init_overlap_type(overlap)
        endif
-    enddo ! end of recv do loop
-
-    ! copy the overlapping information into domain
+    enddo
+    if(debug_message_passing) then
+       iunit = mpp_pe() + 1000
+       do m =1,nrecv
+          write(iunit, *) "********from_pe = " ,overlapList(m)%pe, " count = ",overlapList(m)%count
+          do n = 1, overlapList(m)%count
+             write(iunit, *) overlapList(m)%js(n), overlapList(m)%je(n), overlapList(m)%is(n), overlapList(m)%ie(n), &
+                  overlapList(m)%dir(n), overlapList(m)%rotation(n)
+          enddo
+       enddo
+       if(nrecv >0) flush(iunit)
+    endif
     if(nrecv>0) then
-       update%nrecv = nrecv
-       if (associated(update%recv)) deallocate(update%recv) !< Check if associated
+       if (associated(update%recv)) deallocate(update%recv)
        allocate(update%recv(nrecv))
+       update%nrecv = nrecv
        do m = 1, nrecv
-          call add_update_overlap( update%recv(m), overlapList(m) )
+          call add_update_overlap(update%recv(m), overlapList(m))
           do n = 1, update%recv(m)%count
              if(update%recv(m)%tileNbr(n) == domain%tile_id(tMe)) then
-                if(update%recv(m)%dir(n) == 1) domain%x(tMe)%loffset = 0
                 if(update%recv(m)%dir(n) == 7) domain%y(tMe)%loffset = 0
+                if(update%recv(m)%dir(n) == 1) domain%x(tMe)%loffset = 0
              endif
           enddo
        enddo
     endif
-
     if(nrecv_check>0) then
        check%nrecv = nrecv_check
-       if (associated(check%recv)) deallocate(check%recv) !< Check if associated
+       if (associated(check%recv)) deallocate(check%recv)
        allocate(check%recv(nrecv_check))
        do m = 1, nrecv_check
-          call add_check_overlap( check%recv(m), checkList(m) )
+          call add_check_overlap(check%recv(m), checkList(m))
        enddo
     endif
-
     call deallocate_overlap_type(overlap)
-    do m = 1, MAXLIST
+    do m = 1,size(overlapList(:))
        call deallocate_overlap_type(overlapList(m))
-       if(debug_update_level .NE. NO_CHECK) call deallocate_overlap_type(checkList(m))
     enddo
-
-    update=>NULL()
-    check=>NULL()
-
+    if(debug_update_level .NE. NO_CHECK .AND. set_check) then
+       do m = 1,size(checkList(:))
+          call deallocate_overlap_type(checkList(m))
+       enddo
+    endif
+    deallocate(overlapList)
+    if(set_check) deallocate(checkList)
     domain%initialized = .true.
-
   end subroutine compute_overlaps_fold_east
 
   !#####################################################################################
-  subroutine get_fold_index_west(jsg, jeg, isg, jshift, position, is, ie, js, je)
-    integer,    intent(in) :: jsg, jeg, isg, jshift, position
+  subroutine fill_overlap_send_fold_south(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec,  isg, ieg, dir, &
+       ishift, position, ioff, middle, symmetry)
+    type(overlap_type), intent(inout) :: overlap
+    type(domain2d),     intent(inout) :: domain
+    integer,            intent(in   ) :: m, is, ie, js, je
+    integer,            intent(in   ) :: isc, iec, jsc, jec
+    integer,            intent(in   ) :: isg, ieg, dir, ishift, position, ioff, middle
+    logical, optional,  intent(in   ) :: symmetry
+    integer                           :: is1, ie1, is2, ie2, i
+    if(position == CORNER .AND. .NOT. domain%symmetry .AND. is .LE. isg-1 .AND. ie .GE. isg-1) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, isg-1+ioff, isg-1+ioff, js, js, isc, iec, jsc, jec, &
+            dir, .true.)
+    end if
+    is1 = 0; ie1 = -1; is2 = 0; ie2 = -1
+    if( is > ieg ) then
+       is2 = is-ioff; ie2 = ie-ioff
+    else if( ie > ieg ) then
+       is1 = is; ie1 = ieg
+       is2 = ieg+1-ioff; ie2 = ie-ioff
+    else if( is .GE. middle ) then
+       is1 = is; ie1 = ie
+    else if( ie .GE. middle ) then
+       is1 = middle; ie1 = ie
+       is2 = is;     ie2 = middle-1
+    else if( ie < isg ) then
+       is1 = is+ieg-isg+1-ishift; ie1 = ie+ieg-isg+1-ishift
+    else if( is < isg ) then
+       is1 = is+ieg-isg+1-ishift; ie1 = isg-1+ieg-isg+1-ishift
+       is2 = isg; ie2 = ie
+    else
+       is2 = is; ie2 = ie
+    endif
+    if( ie1 .GE. is1) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, &
+            is1, ie1, js+1, je, isc, iec, jsc, jec, dir, symmetry=symmetry)
+       select case (position)
+       case(NORTH)
+          i = is1; is1 = isg+ieg-ie1; ie1 = isg+ieg-i
+       case(CORNER)
+          i = is1; is1 = isg+ieg-ie1-1+ishift; ie1 = isg+ieg-i-1+ishift
+       end select
+       call insert_update_overlap(overlap, domain%list(m)%pe, is1, ie1, js, js, isc, iec, jsc, jec, dir, .true., &
+            symmetry=symmetry)
+    endif
+    if(ie2 .GE. is2) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, is2, ie2, js, je, isc, iec, jsc, jec, dir)
+    endif
+  end subroutine fill_overlap_send_fold_south
+
+  subroutine fill_overlap_recv_fold_south(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed,  isg, ieg, dir, &
+       ishift, position, ioff, middle, symmetry)
+    type(overlap_type), intent(inout) :: overlap
+    type(domain2d),     intent(inout) :: domain
+    integer,            intent(in   ) :: m, is, ie, js, je
+    integer,            intent(in   ) :: isd, ied, jsd, jed
+    integer,            intent(in   ) :: isg, ieg, dir, ishift, position, ioff, middle
+    logical, optional,  intent(in   ) :: symmetry
+    integer                           :: is1, ie1, is2, ie2, is3, ie3
+    integer                           :: isd1, ied1, isd2, ied2
+    if( position == CORNER .AND. .NOT. domain%symmetry .AND. isd .LE. isg-1 .AND. ied .GE. isg-1 ) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, &
+            is-ioff, ie-ioff, js, je, isg-1, isg-1, jsd, jsd, dir, .true.)
+    end if
+    is1 = 0;  ie1 = -1; is2 = 0;  ie2 = -1
+    isd1 = isd; ied1 = ied
+    isd2 = isd; ied2 = ied
+    select case (position)
+    case(NORTH)
+       is3 = isg+ieg-ie; ie3 = isg+ieg-is
+    case(CORNER)
+       is3 = isg+ieg-ie-1+ishift; ie3 = isg+ieg-is-1+ishift
+    end select
+    if(isd .GT. ieg) then
+       is2 = is + ioff; ie2 = ie + ioff;
+    else if(ied .GT. ieg) then
+       is1 = is; ie1 = ie;
+       isd1 = isd; ied1 = ieg;
+       is2 = is + ioff; ie2 = ie + ioff
+       isd2 = ieg + 1; ied2 = ied
+    else if(isd .GE. middle) then
+       is1 = is; ie1 = ie
+    else if(ied .GE. middle) then
+       is1 = is; ie1 = ie
+       isd1 = middle; ied1 = ied
+       is2 = is; ie2 = ie
+       isd2 = isd; ied2 = middle-1
+    else if(ied .LT. isg) then
+       is1 = is - ioff; ie1 = ie - ioff;
+       is3 = is3 - ioff; ie3 = ie3 - ioff;
+    else if(isd .LT. isg) then
+       is1 = is - ioff; ie1 = ie - ioff;
+       is3 = is3 - ioff; ie3 = ie3 - ioff;
+       isd1 = isd; ied1 = isg-1
+       is2 = is;        ie2 = ie
+       isd2 = isg;      ied2 = ied
+    else
+       is2 = is  ; ie2 = ie
+       isd2 = isd; ied2 = ied
+    endif
+    if( ie1 .GE. is1) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, is1, ie1, js, je, isd1, ied1, jsd+1, jed, dir, &
+            symmetry=symmetry)
+       call insert_update_overlap(overlap, domain%list(m)%pe, is3, ie3, js, je, isd1, ied1, jsd, jsd, dir, .true., &
+            symmetry=symmetry)
+    endif
+    if(ie2 .GE. is2) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, is2, ie2, js, je, isd2, ied2, jsd, jed, dir)
+    endif
+  end subroutine fill_overlap_recv_fold_south
+
+  subroutine fill_overlap_send_nofold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+       joff, is_cyclic, folded, symmetry)
+    type(overlap_type), intent(inout) :: overlap
+    type(domain2d),     intent(inout) :: domain
+    integer,            intent(in   ) :: m, js, je, is, ie
+    integer,            intent(in   ) :: jsc, jec, isc, iec
+    integer,            intent(in   ) :: jsg, jeg, dir, joff
+    logical,            intent(in   ) :: is_cyclic
+    logical, optional,  intent(in   ) :: folded, symmetry
+    call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isc, iec, jsc, jec, dir, reverse=folded, &
+         symmetry=symmetry)
+    if(is_cyclic) then
+       if(je .GT. jeg) then
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js-joff, je-joff, isc, iec, jsc, jec, dir, &
+               reverse=folded, symmetry=symmetry)
+       else if( js .LT. jsg ) then
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js+joff, je+joff, isc, iec, jsc, jec, dir, &
+               reverse=folded, symmetry=symmetry)
+       endif
+    endif
+  end subroutine fill_overlap_send_nofold_east
+  subroutine fill_overlap_send_fold_east(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+       jshift, position, joff, middle, symmetry)
+    type(overlap_type), intent(inout) :: overlap
+    type(domain2d),     intent(inout) :: domain
+    integer,            intent(in   ) :: m, js, je, is, ie
+    integer,            intent(in   ) :: jsc, jec, isc, iec
+    integer,            intent(in   ) :: jsg, jeg, dir, jshift, position, joff, middle
+    logical, optional,  intent(in   ) :: symmetry
+    integer                           :: is1, ie1, js2, je2, j
+    if(position == CORNER .AND. .NOT. domain%symmetry .AND. js .LE. jsg-1 .AND. je .GE. jsg-1) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, ie, ie, jsg-1+joff, jsg-1+joff, isc, iec, jsc, jec, &
+            dir, .true.)
+    end if
+    is1 = 0; ie1 = -1; js2 = 0; je2 = -1
+    if( js > jeg ) then
+       js2 = js-joff; je2 = je-joff
+    else if( je > jeg ) then
+       is1 = js; ie1 = jeg
+       js2 = jeg+1-joff; je2 = je-joff
+    else if( js .GE. middle ) then
+       is1 = js; ie1 = je
+    else if( je .GE. middle ) then
+       is1 = middle; ie1 = je
+       js2 = js;     je2 = middle-1
+    else if( je < jsg ) then
+       is1 = js+jeg-jsg+1-jshift; ie1 = je+jeg-jsg+1-jshift
+    else if( js < jsg ) then
+       is1 = js+jeg-jsg+1-jshift; ie1 = jsg-1+jeg-jsg+1-jshift
+       js2 = jsg; je2 = je
+    else
+       js2 = js; je2 = je
+    endif
+    if( ie1 .GE. is1) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, &
+            is, ie-1, is1, ie1, isc, iec, jsc, jec, dir, symmetry=symmetry)
+       select case (position)
+       case(EAST)
+          j=is1; is1 = jsg+jeg-ie1; ie1 = jsg+jeg-j
+       case(CORNER)
+          j=is1; is1 = jsg+jeg-ie1-1+jshift; ie1 = jsg+jeg-j-1+jshift
+       end select
+       call insert_update_overlap(overlap, domain%list(m)%pe, ie, ie, is1, ie1, isc, iec, jsc, jec, dir, .true., &
+            symmetry=symmetry)
+    endif
+    if(je2 .GE. js2) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js2, je2, isc, iec, jsc, jec, dir)
+    endif
+  end subroutine fill_overlap_send_fold_east
+  subroutine fill_overlap_recv_nofold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+       joff, is_cyclic, folded, symmetry)
+    type(overlap_type), intent(inout) :: overlap
+    type(domain2d),     intent(inout) :: domain
+    integer,            intent(in   ) :: m, js, je, is, ie
+    integer,            intent(in   ) :: jsd, jed, isd, ied
+    integer,            intent(in   ) :: jsg, jeg, dir, joff
+    logical,            intent(in   ) :: is_cyclic
+    logical, optional,  intent(in   ) :: folded, symmetry
+    integer                           :: is1, ie1, js2, je2
+    integer                           :: isd1, ied1, jsd2, jed2
+    is1 = 0; ie1 = -1; js2 = 0; je2 = -1
+    isd1=jsd; ied1=jed
+    jsd2=jsd; jed2=jed
+    call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js, je, isd, ied, jsd, jed, dir, reverse=folded, &
+         symmetry=symmetry)
+    if(is_cyclic) then
+       if(jed .GT. jeg) then
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js+joff, je+joff, isd, ied, jsd, jed, dir, &
+               reverse=folded, symmetry=symmetry)
+       else if( jsd .LT. jsg ) then
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js-joff, je-joff, isd, ied, jsd, jed, dir, &
+               reverse=folded, symmetry=symmetry)
+       else if ( js .LT. jsg ) then
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js+joff, je+joff, isd, ied, jsd, jed, dir, &
+               reverse=folded, symmetry=symmetry)
+       else if ( je .GT. jeg ) then
+          call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js-joff, je-joff, isd, ied, jsd, jed, dir, &
+               reverse=folded, symmetry=symmetry)
+       endif
+    endif
+  end subroutine fill_overlap_recv_nofold_east
+  subroutine fill_overlap_recv_fold_east(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+       jshift, position, joff, middle, symmetry)
+    type(overlap_type), intent(inout) :: overlap
+    type(domain2d),     intent(inout) :: domain
+    integer,            intent(in   ) :: m, js, je, is, ie
+    integer,            intent(in   ) :: jsd, jed, isd, ied
+    integer,            intent(in   ) :: jsg, jeg, dir, jshift, position, joff, middle
+    logical, optional,  intent(in   ) :: symmetry
+    integer                           :: is1, ie1, js2, je2, js3, je3
+    integer                           :: isd1, ied1, jsd2, jed2
+    if( position == CORNER .AND. .NOT. domain%symmetry .AND. jsd .LE. jsg-1 .AND. jed .GE. jsg-1 ) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, &
+            is, ie, js-joff, je-joff, ied, ied, jsg-1, jsg-1, dir, .true.)
+    end if
+    is1 = 0;  ie1 = -1; js2 = 0;  je2 = -1
+    isd1=jsd; ied1=jed
+    jsd2=jsd; jed2=jed
+    select case (position)
+    case(EAST)
+       js3 = jsg+jeg-je; je3 = jsg+jeg-js
+    case(CORNER)
+       js3 = jsg+jeg-je-1+jshift; je3 = jsg+jeg-js-1+jshift
+    end select
+    if(jsd .GT. jeg) then
+       js2 = js + joff; je2 = je + joff;
+    else if(jed .GT. jeg) then
+       is1 = js; ie1 = je;
+       isd1 = jsd; ied1 = jeg;
+       js2 = js + joff; je2 = je + joff
+       jsd2 = jeg + 1; jed2 = jed
+    else if(jsd .GE. middle) then
+       is1 = js; ie1 = je
+    else if(jed .GE. middle) then
+       is1 = js; ie1 = je
+       isd1 = middle; ied1 = jed
+       js2 = js; je2 = je
+       jsd2 = jsd; jed2 = middle-1
+    else if(jed .LT. jsg) then
+       is1 = js - joff; ie1 = je - joff;
+       js3 = js3 - joff; je3 = je3 - joff;
+    else if(jsd .LT. jsg) then
+       is1 = js - joff; ie1 = je - joff;
+       js3 = js3 - joff; je3 = je3 - joff;
+       isd1 = jsd; ied1 = jsg-1
+       js2 = js;        je2 = je
+       jsd2 = jsg;      jed2 = jed
+    else
+       js2 = js  ; je2 =je
+       jsd2 = jsd; jed2 = jed
+    endif
+    if( ie1 .GE. is1) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, is1, ie1, isd, ied-1, isd1, ied1, dir, &
+            symmetry=symmetry)
+       call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js3, je3, ied, ied, isd1, ied1, dir, .true., &
+            symmetry=symmetry)
+    endif
+    if(je2 .GE. js2) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js2, je2, isd, ied, jsd2, jed2, dir)
+    endif
+  end subroutine fill_overlap_recv_fold_east
+
+  subroutine fill_overlap_send_fold_west(overlap, domain, m, is, ie, js, je, isc, iec, jsc, jec, jsg, jeg, dir, &
+       jshift, position, joff, middle, symmetry)
+    type(overlap_type), intent(inout) :: overlap
+    type(domain2d),     intent(inout) :: domain
+    integer,            intent(in   ) :: m, js, je, is, ie
+    integer,            intent(in   ) :: jsc, jec, isc, iec
+    integer,            intent(in   ) :: jsg, jeg, dir, jshift, position, joff, middle
+    logical, optional,  intent(in   ) :: symmetry
+    integer                           :: is1, ie1, js2, je2, j
+    if(position == CORNER .AND. .NOT. domain%symmetry .AND. js .LE. jsg-1 .AND. je .GE. jsg-1) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, is, is, jsg-1+joff, jsg-1+joff, isc, iec, jsc, jec, &
+            dir, .true.)
+    end if
+    is1 = 0; ie1 = -1; js2 = 0; je2 = -1
+    if( js > jeg ) then
+       js2 = js-joff; je2 = je-joff
+    else if( je > jeg ) then
+       is1 = js; ie1 = jeg
+       js2 = jeg+1-joff; je2 = je-joff
+    else if( js .GE. middle ) then
+       is1 = js; ie1 = je
+    else if( je .GE. middle ) then
+       is1 = middle; ie1 = je
+       js2 = js;     je2 = middle-1
+    else if( je < jsg ) then
+       is1 = js+jeg-jsg+1-jshift; ie1 = je+jeg-jsg+1-jshift
+    else if( js < jsg ) then
+       is1 = js+jeg-jsg+1-jshift; ie1 = jsg-1+jeg-jsg+1-jshift
+       js2 = jsg; je2 = je
+    else
+       js2 = js; je2 = je
+    endif
+    if( ie1 .GE. is1) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, &
+            is+1, ie, is1, ie1, isc, iec, jsc, jec, dir, symmetry=symmetry)
+       select case (position)
+       case(EAST)
+          j = is1; is1 = jsg+jeg-ie1; ie1 = jsg+jeg-j
+       case(CORNER)
+          j = is1; is1 = jsg+jeg-ie1-1+jshift; ie1 = jsg+jeg-j-1+jshift
+       end select
+       call insert_update_overlap(overlap, domain%list(m)%pe, is, is, is1, ie1, isc, iec, jsc, jec, dir, .true., &
+            symmetry=symmetry)
+    endif
+    if(je2 .GE. js2) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js2, je2, isc, iec, jsc, jec, dir)
+    endif
+  end subroutine fill_overlap_send_fold_west
+  subroutine fill_overlap_recv_fold_west(overlap, domain, m, is, ie, js, je, isd, ied, jsd, jed, jsg, jeg, dir, &
+       jshift, position, joff, middle, symmetry)
+    type(overlap_type), intent(inout) :: overlap
+    type(domain2d),     intent(inout) :: domain
+    integer,            intent(in   ) :: m, js, je, is, ie
+    integer,            intent(in   ) :: jsd, jed, isd, ied
+    integer,            intent(in   ) :: jsg, jeg, dir, jshift, position, joff, middle
+    logical, optional,  intent(in   ) :: symmetry
+    integer                           :: is1, ie1, js2, je2, js3, je3
+    integer                           :: isd1, ied1, jsd2, jed2
+    if( position == CORNER .AND. .NOT. domain%symmetry .AND. jsd .LE. jsg-1 .AND. jed .GE. jsg-1 ) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, &
+            is, ie, js-joff, je-joff, isd, isd, jsg-1, jsg-1, dir, .true.)
+    end if
+    is1 = 0;  ie1 = -1; js2 = 0;  je2 = -1
+    isd1 = jsd; ied1 = jed
+    jsd2 = jsd; jed2 = jed
+    select case (position)
+    case(EAST)
+       js3 = jsg+jeg-je; je3 = jsg+jeg-js
+    case(CORNER)
+       js3 = jsg+jeg-je-1+jshift; je3 = jsg+jeg-js-1+jshift
+    end select
+    if(jsd .GT. jeg) then
+       js2 = js + joff; je2 = je + joff;
+    else if(jed .GT. jeg) then
+       is1 = js; ie1 = je;
+       isd1 = jsd; ied1 = jeg;
+       js2 = js + joff; je2 = je + joff
+       jsd2 = jeg + 1; jed2 = jed
+    else if(jsd .GE. middle) then
+       is1 = js; ie1 = je
+    else if(jed .GE. middle) then
+       is1 = js; ie1 = je
+       isd1 = middle; ied1 = jed
+       js2 = js; je2 = je
+       jsd2 = jsd; jed2 = middle-1
+    else if(jed .LT. jsg) then
+       is1 = js - joff; ie1 = je - joff;
+       js3 = js3 - joff; je3 = je3 - joff;
+    else if(jsd .LT. jsg) then
+       is1 = js - joff; ie1 = je - joff;
+       js3 = js3 - joff; je3 = je3 - joff;
+       isd1 = jsd; ied1 = jsg-1
+       js2 = js;        je2 = je
+       jsd2 = jsg;      jed2 = jed
+    else
+       js2 = js  ; je2 = je
+       jsd2 = jsd; jed2 = jed
+    endif
+    if( ie1 .GE. is1) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, is1, ie1, isd+1, ied, isd1, ied1, dir, &
+            symmetry=symmetry)
+       call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js3, je3, isd, isd, isd1, ied1, dir, .true., &
+            symmetry=symmetry)
+    endif
+    if(je2 .GE. js2) then
+       call insert_update_overlap(overlap, domain%list(m)%pe, is, ie, js2, je2, isd, ied, jsd2, jed2, dir)
+    endif
+  end subroutine fill_overlap_recv_fold_west
+
+  subroutine get_fold_index_west(jsg, jeg, ifold, jshift, position, is, ie, js, je)
+    integer,    intent(in) :: jsg, jeg, ifold, jshift, position
     integer, intent(inout) :: is, ie, js, je
     integer                :: i, j
 
     select case(position)
     case(CENTER)
        j=js; js = jsg+jeg-je; je = jsg+jeg-j
-       i=is; is = 2*isg-ie-1; ie = 2*isg-i-1
+       i=is; is = 2*ifold-ie-1; ie = 2*ifold-i-1
     case(EAST)
        j=js; js = jsg+jeg-je; je = jsg+jeg-j
-       i=is; is = 2*isg-ie; ie = 2*isg-i
+       i=is; is = 2*ifold-ie; ie = 2*ifold-i
     case(NORTH)
        j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
-       i=is; is = 2*isg-ie-1; ie = 2*isg-i-1
+       i=is; is = 2*ifold-ie-1; ie = 2*ifold-i-1
     case(CORNER)
        j=js; js = jsg+jeg-je-1+jshift; je = jsg+jeg-j-1+jshift
-       i=is; is = 2*isg-ie; ie = 2*isg-i
+       i=is; is = 2*ifold-ie; ie = 2*ifold-i
     end select
 
   end subroutine get_fold_index_west
@@ -4926,24 +5328,24 @@ end subroutine check_message_size
   end subroutine get_fold_index_east
 
   !#####################################################################################
-  subroutine get_fold_index_south(isg, ieg, jsg, ishift, position, is, ie, js, je)
-    integer,    intent(in) :: isg, ieg, jsg, ishift, position
+  subroutine get_fold_index_south(isg, ieg, jfold, ishift, position, is, ie, js, je)
+    integer,    intent(in) :: isg, ieg, jfold, ishift, position
     integer, intent(inout) :: is, ie, js, je
     integer                :: i, j
 
     select case(position)
     case(CENTER)
        i=is; is = isg+ieg-ie; ie = isg+ieg-i
-       j=js; js = 2*jsg-je-1; je = 2*jsg-j-1
+       j=js; js = 2*jfold-je-1; je = 2*jfold-j-1
     case(EAST)
        i=is; is = isg+ieg-ie-1+ishift; ie = isg+ieg-i-1+ishift
-       j=js; js = 2*jsg-je-1; je = 2*jsg-j-1
+       j=js; js = 2*jfold-je-1; je = 2*jfold-j-1
     case(NORTH)
        i=is; is = isg+ieg-ie; ie = isg+ieg-i
-       j=js; js = 2*jsg-je; je = 2*jsg-j
+       j=js; js = 2*jfold-je; je = 2*jfold-j
     case(CORNER)
        i=is; is = isg+ieg-ie-1+ishift; ie = isg+ieg-i-1+ishift
-       j=js; js = 2*jsg-je; je = 2*jsg-j
+       j=js; js = 2*jfold-je; je = 2*jfold-j
     end select
 
   end subroutine get_fold_index_south

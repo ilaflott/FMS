@@ -905,15 +905,15 @@
          end if
       else if( BTEST(domain%fold,SOUTH) .AND. (.NOT.BTEST(update_flags,SCALAR_BIT)) )then      ! ---southern
                                                                                                !! boundary fold
-         ! NOTE: symmetry is assumed for fold-south boundary
-         j = domain%y(1)%global%begin
+         j = domain%y(1)%global%begin+shift-1
          !fold is within domain
          if( domain%y(1)%domain_data%begin.LE.j .AND. j.LE.domain%y(1)%domain_data%end+shift )then
-            midpoint = (domain%x(1)%global%begin+domain%x(1)%global%end-1+shift)/2
+            midpoint = (domain%x(1)%global%end-domain%x(1)%global%begin+1)/2
             !poles set to 0: BGRID only
             if( gridtype.EQ.BGRID_NE )then
-               j  = domain%y(1)%global%begin
+               j  = domain%y(1)%global%begin+shift-1
                is = domain%x(1)%global%begin; ie = domain%x(1)%global%end+shift
+               if( .NOT. domain%symmetry ) is = is - 1
                do i = is ,ie, midpoint
                   if( domain%x(1)%domain_data%begin.LE.i .AND. i.LE. domain%x(1)%domain_data%end+shift )then
                      do l=1,l_size
@@ -931,11 +931,12 @@
             ! the following code code block correct an error where the data in your halo coming from
             ! other half may have the wrong sign
             !off west edge, when update north or west direction
-            j = domain%y(1)%global%begin
+            j = domain%y(1)%global%begin+shift-1
             if ( recv(3) .OR. recv(5) ) then
                select case(gridtype)
                case(BGRID_NE)
                   is = domain%x(1)%global%begin
+                  if( .NOT. domain%symmetry ) is = is - 1
                   if( is.GT.domain%x(1)%domain_data%begin )then
 
                      if( 2*is-domain%x(1)%domain_data%begin.GT.domain%x(1)%domain_data%end+shift ) &
@@ -1001,15 +1002,15 @@
          end if
       else if( BTEST(domain%fold,WEST) .AND. (.NOT.BTEST(update_flags,SCALAR_BIT)) )then      ! ---eastern
                                                                                               !! boundary fold
-         ! NOTE: symmetry is assumed for fold-west boundary
-         i = domain%x(1)%global%begin
+         i = domain%x(1)%global%begin+shift-1
          !fold is within domain
          if( domain%x(1)%domain_data%begin.LE.i .AND. i.LE.domain%x(1)%domain_data%end+shift )then
-            midpoint = (domain%y(1)%global%begin+domain%y(1)%global%end-1+shift)/2
+            midpoint = (domain%y(1)%global%end-domain%y(1)%global%begin+1)/2
             !poles set to 0: BGRID only
             if( gridtype.EQ.BGRID_NE )then
-               i  = domain%x(1)%global%begin
+               i  = domain%x(1)%global%begin+shift-1
                js = domain%y(1)%global%begin; je = domain%y(1)%global%end+shift
+               if( .NOT. domain%symmetry ) js = js - 1
                do j = js ,je, midpoint
                   if( domain%y(1)%domain_data%begin.LE.j .AND. j.LE. domain%y(1)%domain_data%end+shift )then
                      do l=1,l_size
@@ -1027,11 +1028,12 @@
             ! the following code code block correct an error where the data in your halo coming from
             ! other half may have the wrong sign
             !off south edge, when update south or west direction
-            i = domain%x(1)%global%begin
+            i = domain%x(1)%global%begin+shift-1
             if ( recv(3) .OR. recv(5) ) then
                select case(gridtype)
                case(BGRID_NE)
                   js = domain%y(1)%global%begin
+                  if( .NOT. domain%symmetry ) js = js - 1
                   if( js.GT.domain%y(1)%domain_data%begin )then
 
                      if( 2*js-domain%y(1)%domain_data%begin.GT.domain%y(1)%domain_data%end+shift ) &
@@ -1097,15 +1099,15 @@
          end if
       else if( BTEST(domain%fold,EAST) .AND. (.NOT.BTEST(update_flags,SCALAR_BIT)) )then      ! ---eastern
                                                                                               !! boundary fold
-         ! NOTE: symmetry is assumed for fold-west boundary
          i = domain%x(1)%global%end+shift
          !fold is within domain
          if( domain%x(1)%domain_data%begin.LE.i .AND. i.LE.domain%x(1)%domain_data%end+shift )then
-            midpoint = (domain%y(1)%global%begin+domain%y(1)%global%end-1+shift)/2
+            midpoint = (domain%y(1)%global%end-domain%y(1)%global%begin+1)/2
             !poles set to 0: BGRID only
             if( gridtype.EQ.BGRID_NE )then
                i  = domain%x(1)%global%end+shift
                js = domain%y(1)%global%begin; je = domain%y(1)%global%end+shift
+               if( .NOT. domain%symmetry ) js = js - 1
                do j = js ,je, midpoint
                   if( domain%y(1)%domain_data%begin.LE.j .AND. j.LE. domain%y(1)%domain_data%end+shift )then
                      do l=1,l_size
@@ -1128,6 +1130,7 @@
                select case(gridtype)
                case(BGRID_NE)
                   js = domain%y(1)%global%begin
+                  if( .NOT. domain%symmetry ) js = js - 1
                   if( js.GT.domain%y(1)%domain_data%begin )then
 
                      if( 2*js-domain%y(1)%domain_data%begin.GT.domain%y(1)%domain_data%end+shift ) &

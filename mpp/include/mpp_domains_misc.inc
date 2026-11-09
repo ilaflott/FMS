@@ -1996,6 +1996,8 @@ end subroutine init_nonblock_type
 #define NEGATE_HALO_ negate_halo_r8
 #undef FLIP_I_
 #define FLIP_I_ flip_i_r8
+#undef GROUP_FOLD_CORRECTION_
+#define GROUP_FOLD_CORRECTION_ group_fold_correction_r8
 #include <mpp_group_update.fh>
 
 #undef MPP_TYPE_
@@ -2030,4 +2032,6 @@ end subroutine init_nonblock_type
 #define NEGATE_HALO_ negate_halo_r4
 #undef FLIP_I_
 #define FLIP_I_ flip_i_r4
+#undef GROUP_FOLD_CORRECTION_
+#define GROUP_FOLD_CORRECTION_ group_fold_correction_r4
 #include <mpp_group_update.fh>
