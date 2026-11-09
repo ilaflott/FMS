@@ -72,8 +72,86 @@ module test_mpp_update_domains_real
   public :: test_fold_overlap_widths
   public :: test_fold_group_updates
   public :: test_lower_fold_faces
+  public :: test_negative_fold_origins
 
   contains
+
+  subroutine test_negative_fold_origins()
+    integer, parameter :: tangent_lo=-20, tangent_hi=-5
+    integer, parameter :: edges(3) = (/FOLD_SOUTH_EDGE,FOLD_EAST_EDGE,FOLD_WEST_EDGE/)
+    real(kind=r8_kind), parameter :: unset=-9999
+    type(domain2D) :: domain
+    real(kind=r8_kind), allocatable :: field(:,:)
+    real(kind=r8_kind) :: expected
+    integer :: bounds(4), test_layout(2), fold, shift, stagger, position, width, xflags, yflags
+    integer :: is, ie, js, je, isd, ied, jsd, jed, ii, jj, line, first, last, tangent, source
+
+    do fold=1,3
+      bounds = (/tangent_lo,tangent_hi,1,12/)
+      xflags = CYCLIC_GLOBAL_DOMAIN; yflags = edges(fold)
+      if(fold > 1) then
+        bounds = (/1,12,tangent_lo,tangent_hi/)
+        xflags = edges(fold); yflags = CYCLIC_GLOBAL_DOMAIN
+      endif
+      call mpp_define_layout(bounds, mpp_npes(), test_layout)
+      do shift=0,1
+        call mpp_define_domains(bounds, test_layout, domain, xhalo=2, yhalo=2, &
+             xflags=xflags, yflags=yflags, symmetry=shift == 1, name='negative fold origins')
+        do stagger=0,1
+          position = NORTH
+          if(fold > 1) position = EAST
+          if(stagger == 1) position = CORNER
+          call mpp_get_compute_domain(domain, is, ie, js, je, position=position)
+          call mpp_get_memory_domain(domain, isd, ied, jsd, jed, position=position)
+          allocate(field(isd:ied,jsd:jed))
+          line = shift
+          if(fold == 2) line = 12+shift
+          do width=1,2
+            field = unset
+            do jj=js,je
+              do ii=is,ie
+                field(ii,jj) = 1000*ii+jj
+              enddo
+            enddo
+            if(fold == 1 .AND. js == 1 .AND. shift == 0) then
+              do ii=is,ie
+                field(ii,line) = 1000*ii+line
+              enddo
+            else if(fold == 3 .AND. is == 1 .AND. shift == 0) then
+              do jj=js,je
+                field(line,jj) = 1000*line+jj
+              enddo
+            endif
+            call mpp_update_domains(field, domain, position=position, &
+                 whalo=width, ehalo=width, shalo=width, nhalo=width)
+            if(fold == 1) then
+              if(line < js-width .OR. line > je+width) cycle
+              first = max(is,tangent_lo); last = min(ie,tangent_hi-1)
+            else
+              if(line < is-width .OR. line > ie+width) cycle
+              first = max(js,tangent_lo); last = min(je,tangent_hi-1)
+            endif
+            do tangent=first,last
+              source = min(tangent,tangent_lo+tangent_hi-stagger+2*stagger*shift-tangent)
+              ii = line; jj = tangent
+              expected = 1000*line+source
+              if(fold == 1) then
+                ii = tangent; jj = line
+                expected = 1000*source+line
+              endif
+              if(field(ii,jj) /= expected) then
+                write(*,*) 'negative fold, shift, stagger, width, i, j, actual, expected:', &
+                     fold, shift, stagger, width, ii, jj, field(ii,jj), expected
+                call mpp_error(FATAL, 'test_negative_fold_origins: incorrect redundant face')
+              endif
+            enddo
+          enddo
+          deallocate(field)
+        enddo
+        call mpp_deallocate_domain(domain)
+      enddo
+    enddo
+  end subroutine test_negative_fold_origins
 
   subroutine test_lower_fold_faces()
     integer, parameter :: xlo=7, xhi=22, ylo=-5, yhi=6

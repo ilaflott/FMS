@@ -3059,7 +3059,7 @@ end subroutine check_message_size
     update%shalo  = shalo; update%nhalo = nhalo
     ioff = ni - ishift
     joff = nj - jshift
-    middle = (isg+ieg)/2+1
+    middle = isg+(ieg-isg)/2+1
     tMe = 1; tNbr = 1
     update%nsend = 0; update%nrecv = 0
     if(set_check) then
@@ -3698,7 +3698,7 @@ end subroutine check_message_size
     update%whalo  = whalo; update%ehalo = ehalo
     joff = nj - jshift
     ioff = ni - ishift
-    middle = (jsg+jeg)/2+1
+    middle = jsg+(jeg-jsg)/2+1
     tMe = 1; tNbr = 1
     update%nsend = 0; update%nrecv = 0
     if(set_check) then
@@ -4331,7 +4331,7 @@ end subroutine check_message_size
     update%whalo  = whalo; update%ehalo = ehalo
     joff = nj - jshift
     ioff = ni - ishift
-    middle = (jsg+jeg)/2+1
+    middle = jsg+(jeg-jsg)/2+1
     tMe = 1; tNbr = 1
     update%nsend = 0; update%nrecv = 0
     if(set_check) then

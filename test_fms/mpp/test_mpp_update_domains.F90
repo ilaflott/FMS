@@ -26,6 +26,7 @@ program test_mpp_update_domains
   use test_mpp_update_domains_real, only : test_fold_overlap_widths
   use test_mpp_update_domains_real, only : test_fold_group_updates
   use test_mpp_update_domains_real, only : test_lower_fold_faces
+  use test_mpp_update_domains_real, only : test_negative_fold_origins
   use test_mpp_update_domains_int , only : test_halo_update_i8, test_halo_update_i4
   use test_mpp_update_domains_int, only : test_subset_update_i8, test_subset_update_i4
   use mpp_mod, only : mpp_init, mpp_pe, mpp_npes, mpp_root_pe
@@ -79,6 +80,7 @@ program test_mpp_update_domains
   call test_halo_update_r8( 'Folded-east symmetry' ) !includes vector field test
   call test_fold_overlap_widths()
   call test_lower_fold_faces()
+  call test_negative_fold_origins()
   call test_fold_group_updates()
   if (mpp_pe() == mpp_root_pe()) &
     print *, '--------------------> Calling integer test_halo_update <-------------------'
